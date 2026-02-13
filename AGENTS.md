@@ -14,12 +14,25 @@ This document provides instructions for AI coding agents working in this reposit
 
 ```
 softfoundry/
-├── src/softfoundry/       # Main package source code
-│   ├── __init__.py        # Package entry point
-│   └── agents/            # Agent implementations
-├── castings/              # Generated project workspaces (e.g., castings/arithmetic/)
-├── pyproject.toml         # Project configuration
-└── uv.lock                # Dependency lock file
+├── src/softfoundry/           # Main package source code
+│   ├── __init__.py            # Package entry point
+│   ├── agents/                # Agent implementations
+│   │   ├── __init__.py
+│   │   ├── manager.py         # Manager agent (coordinates tasks)
+│   │   └── programmer.py      # Programmer agent (implements tasks)
+│   └── utils/                 # Shared utilities
+│       ├── __init__.py
+│       ├── output.py          # Rich message formatting
+│       ├── sessions.py        # Session persistence
+│       └── state.py           # State detection from files
+├── castings/                  # Generated project workspaces
+│   └── {project}/             # A generated project
+│   └── {project}-planning/    # Planning files for that project
+│       ├── PROJECT.md         # Project description
+│       ├── tasks/             # Task files
+│       └── team/              # Team member files
+├── pyproject.toml             # Project configuration
+└── uv.lock                    # Dependency lock file
 ```
 
 ## Build/Run Commands
@@ -146,9 +159,29 @@ async def run_my_agent(task: str, workspace: str) -> None:
         ...
 ```
 
+### Running Agents
+
+```bash
+# Run the manager agent
+uv run python -m softfoundry.agents.manager --project-dir castings/{project}
+
+# Run a programmer agent
+uv run python -m softfoundry.agents.programmer --name "John Doe" --project-dir castings/{project}
+```
+
+**CLI Options (both agents):**
+- `--name` - Agent name (default: "Alice Chen" for manager, "John Doe" for programmer)
+- `--project-dir` - Path to the project directory (required)
+- `--verbosity` - Output level: minimal, medium, verbose (default: medium)
+- `--max-iterations` - Safety limit for loop iterations (default: 100)
+- `--resume` - Automatically resume existing session
+- `--new-session` - Start fresh, deleting any existing session
+
 ### Castings Directory
 
-The `castings/` directory contains generated project workspaces.
+The `castings/` directory contains generated project workspaces:
+- `castings/{project}/` - The actual project code
+- `castings/{project}-planning/` - Planning files (PROJECT.md, tasks/, team/)
 
 ## Git Conventions
 
