@@ -4,11 +4,19 @@ This document provides instructions for AI coding agents working in this reposit
 
 ## Project Overview
 
-**softfoundry** employs multiple AI agents (Planner, Programmer, Tester, Reviewer, etc.) that collaborate to generate complete software projects end-to-end using `claude-agent-sdk`.
+**softfoundry** employs multiple AI agents (Manager, Programmer, Reviewer) that collaborate to generate complete software projects end-to-end using `claude-agent-sdk` and GitHub for coordination.
 
 - **Package Manager**: uv (https://docs.astral.sh/uv/)
 - **Python Version**: 3.12+
 - **Source Layout**: `src/softfoundry/`
+
+## Architecture
+
+The system uses GitHub as the central coordination mechanism:
+- **Tasks** are tracked as GitHub Issues with labels
+- **Programmers** work in git worktrees for parallel development
+- **PRs** are created for each task and reviewed before merging
+- **Status files** at `~/.softfoundry/agents/` enable health monitoring
 
 ## Directory Structure
 
@@ -18,21 +26,32 @@ softfoundry/
 │   ├── __init__.py            # Package entry point
 │   ├── agents/                # Agent implementations
 │   │   ├── __init__.py
-│   │   ├── manager.py         # Manager agent (coordinates tasks)
-│   │   └── programmer.py      # Programmer agent (implements tasks)
+│   │   ├── manager.py         # Manager agent (coordinates project)
+│   │   ├── programmer.py      # Programmer agent (implements tasks)
+│   │   └── reviewer.py        # Reviewer agent (reviews and merges PRs)
 │   └── utils/                 # Shared utilities
 │       ├── __init__.py
 │       ├── output.py          # Rich message formatting
 │       ├── sessions.py        # Session persistence
-│       └── state.py           # State detection from files
+│       └── status.py          # Agent status file management
 ├── castings/                  # Generated project workspaces
-│   └── {project}/             # A generated project
-│   └── {project}-planning/    # Planning files for that project
-│       ├── PROJECT.md         # Project description
-│       ├── tasks/             # Task files
-│       └── team/              # Team member files
+│   ├── {project}/             # Main git clone
+│   ├── {project}-{name}/      # Programmer worktrees
+├── docs/                      # Documentation
+│   └── IMPLEMENTATION_PLAN.md # Full system design
 ├── pyproject.toml             # Project configuration
 └── uv.lock                    # Dependency lock file
+
+~/.softfoundry/                # User-level data
+├── sessions/                  # Session persistence files
+│   ├── manager-{project}.json
+│   ├── programmer-{name}-{project}.json
+│   └── reviewer-{project}.json
+└── agents/                    # Agent status files
+    └── {project}/
+        ├── manager.status
+        ├── programmer-{name}.status
+        └── reviewer.status
 ```
 
 ## Build/Run Commands
@@ -151,7 +170,7 @@ Agents in `src/softfoundry/agents/` use `claude_agent_sdk`:
 ```python
 async def run_my_agent(task: str, workspace: str) -> None:
     options = ClaudeAgentOptions(
-        allowed_tools=["Read", "Edit", "Glob"],
+        allowed_tools=["Read", "Edit", "Glob", "Bash"],
         permission_mode="acceptEdits",
         system_prompt=f"System prompt for {workspace}",
     )
@@ -162,26 +181,99 @@ async def run_my_agent(task: str, workspace: str) -> None:
 ### Running Agents
 
 ```bash
-# Run the manager agent
-uv run python -m softfoundry.agents.manager --project-dir castings/{project}
+# Run the manager agent (interactive - prompts for repo and num programmers)
+uv run python -m softfoundry.agents.manager
 
-# Run a programmer agent
-uv run python -m softfoundry.agents.programmer --name "John Doe" --project-dir castings/{project}
+# Run the manager with all options specified
+uv run python -m softfoundry.agents.manager \
+    --github-repo owner/repo \
+    --clone-path castings/myproject \
+    --num-programmers 2
+
+# Run a programmer agent (spawned by manager, not usually run manually)
+uv run python -m softfoundry.agents.programmer \
+    --name "Alice Chen" \
+    --github-repo owner/repo \
+    --clone-path castings/myproject \
+    --project myproject
+
+# Run the reviewer agent (spawned by manager, not usually run manually)
+uv run python -m softfoundry.agents.reviewer \
+    --github-repo owner/repo \
+    --clone-path castings/myproject \
+    --project myproject
 ```
 
-**CLI Options (both agents):**
-- `--name` - Agent name (default: "Alice Chen" for manager, "John Doe" for programmer)
-- `--project-dir` - Path to the project directory (required)
+**Manager CLI Options:**
+- `--github-repo` - GitHub repository (OWNER/REPO format, prompted if not provided)
+- `--clone-path` - Local path to clone repo (default: castings/{project})
+- `--num-programmers` - Number of programmer agents (prompted if not provided)
 - `--verbosity` - Output level: minimal, medium, verbose (default: medium)
 - `--max-iterations` - Safety limit for loop iterations (default: 100)
 - `--resume` - Automatically resume existing session
 - `--new-session` - Start fresh, deleting any existing session
 
+**Programmer CLI Options:**
+- `--name` - Programmer name (required, e.g., "Alice Chen")
+- `--github-repo` - GitHub repository (required)
+- `--clone-path` - Path to main git clone (required)
+- `--project` - Project name (required)
+- `--verbosity`, `--max-iterations`, `--resume`, `--new-session` - Same as manager
+
+**Reviewer CLI Options:**
+- `--github-repo` - GitHub repository (required)
+- `--clone-path` - Path to main git clone (required)
+- `--project` - Project name (required)
+- `--verbosity`, `--max-iterations`, `--resume`, `--new-session` - Same as manager
+
+### GitHub Label Schema
+
+The manager creates these labels on project setup:
+
+| Label | Color | Purpose |
+|-------|-------|---------|
+| `assignee:{name}` | `#0366d6` | Task assignment |
+| `status:pending` | `#fbca04` | Not started |
+| `status:in-progress` | `#0e8a16` | Being worked on |
+| `status:in-review` | `#6f42c1` | PR awaiting review |
+| `priority:high` | `#d73a4a` | High priority |
+| `priority:medium` | `#fbca04` | Medium priority |
+| `priority:low` | `#0e8a16` | Low priority |
+
+### Status File Format
+
+Agents maintain status files at `~/.softfoundry/agents/{project}/`:
+
+```json
+{
+  "agent_type": "programmer",
+  "name": "Alice Chen",
+  "project": "scicalc",
+  "pid": 12345,
+  "status": "working",
+  "details": "Implementing issue #3: Add trigonometric functions",
+  "current_issue": 3,
+  "current_pr": null,
+  "last_update": "2026-02-13T14:30:00Z",
+  "started_at": "2026-02-13T14:00:00Z"
+}
+```
+
+**Status values:**
+- `starting` - Initializing
+- `idle` - Waiting for work
+- `working` - Actively implementing
+- `waiting_review` - PR created, waiting for review
+- `addressing_feedback` - Addressing PR feedback
+- `exited:success` - Completed all work
+- `exited:error` - Crashed/errored
+- `exited:terminated` - Killed by user or manager
+
 ### Castings Directory
 
 The `castings/` directory contains generated project workspaces:
-- `castings/{project}/` - The actual project code
-- `castings/{project}-planning/` - Planning files (PROJECT.md, tasks/, team/)
+- `castings/{project}/` - Main git clone
+- `castings/{project}-{name-slug}/` - Programmer worktrees (e.g., `castings/scicalc-alice-chen/`)
 
 ## Git Conventions
 

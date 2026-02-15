@@ -1,10 +1,17 @@
-"""Session management utilities for agent persistence."""
+"""Session management utilities for agent persistence.
+
+Sessions are stored centrally at ~/.softfoundry/sessions/ to persist
+across different project directories and allow easy backup/cleanup.
+"""
 
 import json
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+
+# Centralized sessions directory
+SESSIONS_DIR = Path.home() / ".softfoundry" / "sessions"
 
 
 @dataclass
@@ -13,8 +20,8 @@ class SessionInfo:
 
     session_id: str
     agent_name: str
-    agent_type: str  # "manager" or "programmer"
-    project_directory: str
+    agent_type: str  # "manager", "programmer", or "reviewer"
+    project: str  # Project name (e.g., "scicalc")
     last_run: str  # ISO timestamp
     num_turns: int
     total_cost_usd: float | None = None
@@ -23,22 +30,18 @@ class SessionInfo:
 class SessionManager:
     """Manages session persistence for agents.
 
-    Sessions are stored in the planning directory under `.sessions/`.
-    Each agent has its own session file named `{agent_type}-{sanitized_name}.json`.
+    Sessions are stored centrally at ~/.softfoundry/sessions/.
+    Each agent has its own session file named `{agent_type}-{sanitized_name}-{project}.json`.
     """
 
-    SESSIONS_DIR = ".sessions"
-
-    def __init__(self, project_directory: str) -> None:
+    def __init__(self, project: str) -> None:
         """Initialize the session manager.
 
         Args:
-            project_directory: Path to the project directory.
-                The planning directory is derived as `{project_directory}-planning`.
+            project: The project name (e.g., "scicalc").
         """
-        self.project_directory = project_directory
-        self.planning_directory = f"{project_directory}-planning"
-        self.sessions_path = Path(self.planning_directory) / self.SESSIONS_DIR
+        self.project = project
+        self.sessions_path = SESSIONS_DIR
 
     def _sanitize_name(self, name: str) -> str:
         """Convert an agent name to a safe filename.
@@ -58,14 +61,14 @@ class SessionManager:
         """Get the path to a session file.
 
         Args:
-            agent_type: The type of agent ("manager" or "programmer").
+            agent_type: The type of agent ("manager", "programmer", or "reviewer").
             agent_name: The name of the agent.
 
         Returns:
             Path to the session file.
         """
         sanitized_name = self._sanitize_name(agent_name)
-        filename = f"{agent_type}-{sanitized_name}.json"
+        filename = f"{agent_type}-{sanitized_name}-{self.project}.json"
         return self.sessions_path / filename
 
     def get_session(self, agent_type: str, agent_name: str) -> SessionInfo | None:
@@ -138,7 +141,7 @@ class SessionManager:
         Args:
             session_id: The session ID from the ResultMessage.
             agent_name: The name of the agent.
-            agent_type: The type of agent ("manager" or "programmer").
+            agent_type: The type of agent ("manager", "programmer", or "reviewer").
             num_turns: Number of turns completed.
             total_cost_usd: Total cost in USD (optional).
 
@@ -149,7 +152,7 @@ class SessionManager:
             session_id=session_id,
             agent_name=agent_name,
             agent_type=agent_type,
-            project_directory=self.project_directory,
+            project=self.project,
             last_run=datetime.now().isoformat(),
             num_turns=num_turns,
             total_cost_usd=total_cost_usd,

@@ -1,4 +1,4 @@
-"""Programmer agent that works on GitHub issues and creates PRs."""
+"""Reviewer agent that reviews PRs and merges approved code."""
 
 import argparse
 import asyncio
@@ -19,36 +19,25 @@ from softfoundry.utils.input import read_multiline_input
 from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import create_printer
 from softfoundry.utils.sessions import SessionManager, format_session_info
-from softfoundry.utils.status import (
-    get_status_path,
-    read_status,
-    sanitize_name,
-    update_status,
-)
+from softfoundry.utils.status import get_status_path, read_status, update_status
 
-AGENT_TYPE = "programmer"
-POLL_INTERVAL = 30  # seconds to wait when idle
+AGENT_TYPE = "reviewer"
+POLL_INTERVAL = 30  # seconds to wait when no PRs to review
 DEFAULT_MAX_ITERATIONS = 100
 
 
 def get_system_prompt(
-    name: str,
     project: str,
     github_repo: str,
     clone_path: str,
-    worktree_path: str,
     status_path: Path,
 ) -> str:
-    """Generate the system prompt for the programmer agent."""
-    name_slug = sanitize_name(name)
-
-    return f"""You are {name}, a programmer working on the {project} project.
+    """Generate the system prompt for the reviewer agent."""
+    return f"""You are the code reviewer for the {project} project.
 
 GitHub repo: {github_repo}
-Main clone: {clone_path}
-Your worktree: {worktree_path}
+Clone path: {clone_path}
 Status file: {status_path}
-Your assignee label: assignee:{name_slug}
 
 ## Status File Updates
 
@@ -57,152 +46,111 @@ CRITICAL: You MUST update your status file frequently using Bash:
 ```bash
 cat > {status_path} << 'EOF'
 {{
-  "agent_type": "programmer",
-  "name": "{name}",
+  "agent_type": "reviewer",
   "project": "{project}",
   "status": "working",
   "details": "Description of what you're doing",
-  "current_issue": 3,
-  "current_pr": null,
+  "current_pr": 5,
   "last_update": "$(date -Iseconds)",
   "pid": {os.getpid()}
 }}
 EOF
 ```
 
-Status values: starting, idle, working, waiting_review, addressing_feedback, exited:success, exited:error
+Status values: starting, idle, working, exited:success, exited:error
 
 ## Workflow
 
-### 1. Find Tasks Assigned to You
+### 1. Find PRs to Review
 
 ```bash
-gh issue list --repo {github_repo} --label "assignee:{name_slug}" --label "status:pending" --json number,title,body
+gh pr list --repo {github_repo} --state open --json number,title,author,headRefName
 ```
 
-### 2. If No Assigned Tasks, Help Others
-
-Pick any unassigned pending task:
-```bash
-gh issue list --repo {github_repo} --label "status:pending" --json number,title,body
-```
-
-Take the first one that doesn't have another programmer's assignee label.
-
-### 3. If No Pending Tasks
+### 2. If No Open PRs
 
 Check if project is complete:
 ```bash
 gh issue list --repo {github_repo} --state open --json number
 ```
 
-If no open issues, exit gracefully with status "exited:success".
+If no open issues and no open PRs, project is complete - exit with "exited:success".
+Otherwise, wait {POLL_INTERVAL} seconds and check again.
 
-### 4. Start a Task
+### 3. Review Each PR
 
-a. Create your worktree (if not exists):
+a. Get PR details:
+```bash
+gh pr view N --repo {github_repo} --json number,title,body,additions,deletions,changedFiles,headRefName
+```
+
+b. Get the diff:
+```bash
+gh pr diff N --repo {github_repo}
+```
+
+c. Check the linked issue for context (look for "Closes #X" in the PR body)
+
+d. Fetch and checkout the branch to review locally:
 ```bash
 cd {clone_path}
 git fetch origin
-git worktree add {worktree_path} -b feature/issue-N-slug origin/main
+git checkout origin/BRANCH_NAME
 ```
 
-Or if worktree exists, just create a new branch:
+e. Review the code by reading files and understanding the changes
+
+### 4. Review Criteria
+
+- **Correctness**: Does the code do what the issue asks?
+- **Bugs**: Are there any logic errors or edge cases?
+- **Code quality**: Is the code clean and readable?
+- **Style**: Does it follow the project's conventions?
+- **Tests**: Are there tests if applicable?
+- **Documentation**: Are changes documented if needed?
+
+### 5. Make a Decision
+
+**If code is good - Approve and merge:**
 ```bash
-cd {worktree_path}
-git fetch origin
-git checkout -b feature/issue-N-slug origin/main
+gh pr review N --repo {github_repo} --approve --body "LGTM! Good implementation."
+gh pr merge N --repo {github_repo} --squash --delete-branch
 ```
 
-b. Update issue labels:
+The merge will automatically close the linked issue if the PR body contains "Closes #X".
+
+**If changes are needed - Request changes:**
 ```bash
-gh issue edit N --repo {github_repo} --remove-label "status:pending" --add-label "status:in-progress"
+gh pr review N --repo {github_repo} --request-changes --body "Please address the following:
+
+1. Issue description
+2. Another issue
+
+Let me know when these are fixed."
 ```
 
-c. Comment on the issue:
-```bash
-gh issue comment N --repo {github_repo} --body "Starting implementation"
-```
+Be specific about what needs to change. The programmer will address feedback and push updates.
 
-d. Update your status file with current_issue
+### 6. After Review
 
-### 5. Implement the Task
+Update your status file and continue to the next PR, or wait if there are no more.
 
-- Work in your worktree: {worktree_path}
-- Follow the project's coding standards
-- Write tests if applicable
-- Commit frequently with clear messages
+### 7. When All Work is Done
 
-Periodically update:
-- Issue with progress: `gh issue comment N --body "Progress: ..."`
-- Your status file
+If:
+- No open PRs
+- No open issues (all closed)
 
-### 6. Create a PR
-
-When implementation is complete:
-
-```bash
-cd {worktree_path}
-git add -A
-git commit -m "feat: description of changes"
-git push -u origin feature/issue-N-slug
-```
-
-Create the PR:
-```bash
-gh pr create --repo {github_repo} --title "Title" --body "## Summary
-
-Description
-
-Closes #N"
-```
-
-Update labels:
-```bash
-gh issue edit N --repo {github_repo} --remove-label "status:in-progress" --add-label "status:in-review"
-```
-
-Update your status file with current_pr and status "waiting_review".
-
-### 7. Wait for Review
-
-Check PR status:
-```bash
-gh pr view PR_NUMBER --repo {github_repo} --json state,reviewDecision,reviews
-```
-
-- If `reviewDecision` is "APPROVED" and merged: clean up and find next task
-- If `reviewDecision` is "CHANGES_REQUESTED": address feedback and push updates
-- If still waiting: check again in {POLL_INTERVAL} seconds
-
-### 8. Handle Conflicts
-
-If PR has conflicts:
-```bash
-cd {worktree_path}
-git fetch origin
-git rebase origin/main
-# Resolve conflicts if any
-git push --force-with-lease
-```
-
-### 9. Clean Up After Merge
-
-```bash
-cd {clone_path}
-git worktree remove {worktree_path} --force
-git branch -D feature/issue-N-slug
-```
-
-Or just create a new branch for the next task in your worktree.
+Then the project is complete. Update status to "exited:success" and exit.
 
 ## Important Notes
 
-- Always work in your worktree, not the main clone
+- Be thorough but efficient
+- Give constructive feedback
+- Approve good code promptly to keep the project moving
+- The programmers are AI agents too - be specific in feedback
 - Keep your status file updated so the manager knows you're alive
-- If you crash, read your status file on restart to resume
-- When all tasks are done, exit with status "exited:success"
-- If you need clarification on a task, ask the user
+- If you're unsure about something, ask the user for guidance
 """
 
 
@@ -247,8 +195,7 @@ def extract_assistant_text(message: AssistantMessage) -> str:
     return "\n".join(texts)
 
 
-async def run_programmer(
-    name: str,
+async def run_reviewer(
     github_repo: str,
     clone_path: str,
     project: str,
@@ -257,10 +204,9 @@ async def run_programmer(
     new_session: bool = False,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
 ) -> None:
-    """Run the programmer agent.
+    """Run the reviewer agent.
 
     Args:
-        name: Programmer name (e.g., "Alice Chen").
         github_repo: GitHub repository in OWNER/REPO format.
         clone_path: Path to the main git clone.
         project: Project name.
@@ -272,44 +218,40 @@ async def run_programmer(
     printer = create_printer(verbosity)
     shutdown_state = setup_signal_handlers()
 
-    name_slug = sanitize_name(name)
-    worktree_path = f"{clone_path}-{name_slug}"
-
     # Initialize status file
-    status_path = get_status_path(project, "programmer", name)
+    status_path = get_status_path(project, "reviewer")
     update_status(
         status_path,
         status="starting",
-        details="Initializing programmer agent",
-        agent_type="programmer",
-        name=name,
+        details="Initializing reviewer agent",
+        agent_type="reviewer",
         project=project,
     )
 
     # Session management
     session_manager = SessionManager(project)
-    existing_session = session_manager.get_session(AGENT_TYPE, name)
+    existing_session = session_manager.get_session(AGENT_TYPE, "reviewer")
     current_session_id: str | None = None
 
     if existing_session:
         if new_session:
-            session_manager.delete_session(AGENT_TYPE, name)
-            printer.console.print(f"Deleted existing session for {name}.")
+            session_manager.delete_session(AGENT_TYPE, "reviewer")
+            printer.console.print("Deleted existing session.")
         elif resume:
             current_session_id = existing_session.session_id
-            printer.console.print(f"Resuming session for {name}...")
+            printer.console.print("Resuming previous session...")
         else:
-            printer.console.print(f"Found previous session for {name}:")
+            printer.console.print("Found previous session:")
             print(format_session_info(existing_session))
             response = input("Continue previous session? [y/N]: ").strip().lower()
             if response == "y":
                 current_session_id = existing_session.session_id
                 printer.console.print("Resuming session...")
             else:
-                session_manager.delete_session(AGENT_TYPE, name)
+                session_manager.delete_session(AGENT_TYPE, "reviewer")
                 printer.console.print("Starting new session...")
     elif resume:
-        print(f"Error: No existing session found for {name}.", file=sys.stderr)
+        print("Error: No existing session found.", file=sys.stderr)
         print("Run without --resume to start a new session.", file=sys.stderr)
         sys.exit(1)
 
@@ -321,49 +263,43 @@ async def run_programmer(
         if status.startswith("exited:"):
             # Agent had exited, starting fresh
             pass
-        elif existing_status.get("current_issue"):
-            issue_num = existing_status.get("current_issue")
+        elif existing_status.get("current_pr"):
             pr_num = existing_status.get("current_pr")
             resume_context = f"""
 IMPORTANT: You previously crashed or were interrupted.
 Your last status was: {status}
-You were working on issue #{issue_num}.
-{"You had created PR #" + str(pr_num) + "." if pr_num else "No PR was created yet."}
+You were reviewing PR #{pr_num}.
 Details: {existing_status.get("details", "N/A")}
 
-Check the current state of issue #{issue_num} and continue from where you left off.
+Check the current state of PR #{pr_num} and continue from where you left off.
 """
 
     # Build system prompt
     system_prompt = get_system_prompt(
-        name=name,
         project=project,
         github_repo=github_repo,
         clone_path=clone_path,
-        worktree_path=worktree_path,
         status_path=status_path,
     )
 
     # Initial prompt
-    initial_prompt = f"""Start working as {name} on the {project} project.
+    initial_prompt = f"""Start reviewing PRs for the {project} project.
 
 GitHub repo: {github_repo}
 Clone path: {clone_path}
-Your worktree: {worktree_path}
 
 {resume_context}
 
-Find a task to work on and start implementing it.
+Find open PRs and start reviewing them.
 """
 
-    # Build options - work from worktree if it exists, otherwise clone path
-    cwd = worktree_path if Path(worktree_path).exists() else clone_path
+    # Build options
     options = ClaudeAgentOptions(
-        allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+        allowed_tools=["Read", "Glob", "Bash", "Grep"],
         permission_mode="acceptEdits",
         resume=current_session_id,
         system_prompt=system_prompt,
-        cwd=str(Path(cwd).resolve()) if Path(cwd).exists() else None,
+        cwd=str(Path(clone_path).resolve()) if Path(clone_path).exists() else None,
     )
 
     # Main loop using ClaudeSDKClient
@@ -401,25 +337,25 @@ Find a task to work on and start implementing it.
                             # Save session for crash recovery
                             session_info = session_manager.create_session_info(
                                 session_id=message.session_id,
-                                agent_name=name,
+                                agent_name="reviewer",
                                 agent_type=AGENT_TYPE,
                                 num_turns=message.num_turns,
                                 total_cost_usd=message.total_cost_usd,
                             )
                             session_manager.save_session(session_info)
 
-                            # Check if agent decided to exit
+                            # Check if project is complete
                             if (
                                 message.result
                                 and "exited:success" in message.result.lower()
                             ):
                                 printer.console.print(
-                                    "[bold green]All tasks completed![/bold green]"
+                                    "[bold green]All PRs reviewed and merged![/bold green]"
                                 )
                                 update_status(
                                     status_path,
                                     status="exited:success",
-                                    details="All tasks completed",
+                                    details="All PRs reviewed and merged",
                                 )
                                 return
                 finally:
@@ -436,7 +372,7 @@ Find a task to work on and start implementing it.
                     )
                     break
 
-                # Determine next action: user input or continue working
+                # Determine next action: user input or continue reviewing
                 if needs_user_input(last_assistant_text):
                     # Interactive: wait for user input
                     printer.console.print("[cyan]Waiting for your input...[/cyan]")
@@ -450,9 +386,9 @@ Find a task to work on and start implementing it.
                     current_status = read_status(status_path)
                     if current_status:
                         status = current_status.get("status", "")
-                        if status in ("idle", "waiting_review"):
+                        if status == "idle":
                             printer.console.print(
-                                f"[dim]Status: {status}. Checking again in {POLL_INTERVAL}s...[/dim]"
+                                f"[dim]No PRs to review. Checking again in {POLL_INTERVAL}s...[/dim]"
                             )
                             try:
                                 await asyncio.sleep(POLL_INTERVAL)
@@ -460,7 +396,7 @@ Find a task to work on and start implementing it.
                                 break
 
                     await client.query(
-                        "Continue working. Check task status, implement, or check for review feedback."
+                        "Continue reviewing. Check for new PRs, review pending ones, or determine if project is complete."
                     )
 
     except GracefulExit:
@@ -498,15 +434,9 @@ Find a task to work on and start implementing it.
 
 
 def main() -> None:
-    """Entry point for the programmer agent CLI."""
+    """Entry point for the reviewer agent CLI."""
     parser = argparse.ArgumentParser(
-        description="Run a programmer agent for task implementation."
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        required=True,
-        help="Name of the programmer (e.g., 'Alice Chen')",
+        description="Run the reviewer agent for PR review and merging."
     )
     parser.add_argument(
         "--github-repo",
@@ -555,8 +485,7 @@ def main() -> None:
     args = parser.parse_args()
 
     asyncio.run(
-        run_programmer(
-            name=args.name,
+        run_reviewer(
             github_repo=args.github_repo,
             clone_path=args.clone_path,
             project=args.project,
