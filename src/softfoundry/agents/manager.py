@@ -3,64 +3,112 @@
 import argparse
 import asyncio
 import os
-import signal
 import sys
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    TextBlock,
-)
+from claude_agent_sdk import ResultMessage
 
-from softfoundry.utils.input import read_multiline_input
-from softfoundry.utils.llm import needs_user_input
-from softfoundry.utils.output import create_printer
-from softfoundry.utils.sessions import SessionManager, format_session_info
-from softfoundry.utils.status import get_status_path, read_status, update_status
+from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "manager"
 POLL_INTERVAL = 60  # seconds between monitoring cycles
 DEFAULT_MAX_ITERATIONS = 100
 
 
-def get_system_prompt(
-    project: str,
-    github_repo: str,
-    clone_path: str,
-    status_path: Path,
-    num_programmers: int,
-) -> str:
-    """Generate the system prompt for the manager agent."""
-    # Generate programmer names
-    programmer_names = [
-        ("Alice Chen", "alice-chen"),
-        ("Bob Smith", "bob-smith"),
-        ("Carol Davis", "carol-davis"),
-        ("David Lee", "david-lee"),
-        ("Eve Wilson", "eve-wilson"),
-    ][:num_programmers]
+class ManagerAgent(Agent):
+    """Manager agent that coordinates project setup and monitors progress.
 
-    programmer_commands = "\n\n".join(
-        f"""**Programmer {i + 1} ({name}):**
+    This agent:
+    1. Sets up the project (clone repo, create PROJECT.md, create issues)
+    2. Guides the user to start programmer and reviewer agents
+    3. Monitors project progress
+    4. Determines when the project is complete
+    """
+
+    def __init__(
+        self,
+        github_repo: str,
+        clone_path: str,
+        num_programmers: int,
+        project: str,
+        resume: bool = False,
+        new_session: bool = False,
+        verbosity: str = "medium",
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    ):
+        """Initialize the manager agent.
+
+        Args:
+            github_repo: GitHub repository in OWNER/REPO format.
+            clone_path: Local path to clone the repo.
+            num_programmers: Number of programmer agents.
+            project: Project name (derived from repo).
+            resume: If True, automatically resume existing session.
+            new_session: If True, force a new session.
+            verbosity: Output verbosity level.
+            max_iterations: Maximum loop iterations.
+        """
+        # Store agent-specific state
+        self.github_repo = github_repo
+        self.clone_path = clone_path
+        self.num_programmers = num_programmers
+
+        # Generate programmer names
+        self.programmer_names = [
+            ("Alice Chen", "alice-chen"),
+            ("Bob Smith", "bob-smith"),
+            ("Carol Davis", "carol-davis"),
+            ("David Lee", "david-lee"),
+            ("Eve Wilson", "eve-wilson"),
+        ][:num_programmers]
+
+        # Determine working directory
+        cwd = str(Path(clone_path).resolve()) if Path(clone_path).exists() else None
+
+        # Build config and delegate to parent
+        config = AgentConfig(
+            project=project,
+            agent_type=AGENT_TYPE,
+            agent_name="manager",
+            allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+            permission_mode="acceptEdits",
+            cwd=cwd,
+            max_iterations=max_iterations,
+            resume=resume,
+            new_session=new_session,
+            verbosity=verbosity,
+        )
+        super().__init__(config)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ABSTRACT METHOD IMPLEMENTATIONS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_system_prompt(self) -> str:
+        """Generate the system prompt for the manager agent."""
+        programmer_commands = "\n\n".join(
+            f"""**Programmer {i + 1} ({name}):**
 ```bash
 uv run python -m softfoundry.agents.programmer \\
     --name "{name}" \\
-    --github-repo {github_repo} \\
-    --clone-path {clone_path} \\
-    --project {project}
+    --github-repo {self.github_repo} \\
+    --clone-path {self.clone_path} \\
+    --project {self.config.project}
 ```"""
-        for i, (name, _) in enumerate(programmer_names)
-    )
+            for i, (name, _) in enumerate(self.programmer_names)
+        )
 
-    return f"""You are the Manager agent for the {project} project.
+        assignee_labels = "\n".join(
+            f'   gh label create "assignee:{slug}" --color "0366d6" --repo {self.github_repo} --force'
+            for _, slug in self.programmer_names
+        )
 
-GitHub repo: {github_repo}
-Local clone: {clone_path}
-Status file: {status_path}
-Number of programmers: {num_programmers}
+        return f"""You are the Manager agent for the {self.config.project} project.
+
+GitHub repo: {self.github_repo}
+Local clone: {self.clone_path}
+Status file: {self._status_path}
+Number of programmers: {self.num_programmers}
 
 Your responsibilities:
 1. Project setup and task planning
@@ -73,10 +121,10 @@ Your responsibilities:
 CRITICAL: You MUST update your status file frequently using Bash:
 
 ```bash
-cat > {status_path} << 'EOF'
+cat > {self._status_path} << 'EOF'
 {{
   "agent_type": "manager",
-  "project": "{project}",
+  "project": "{self.config.project}",
   "status": "working",
   "details": "Description of what you're doing",
   "last_update": "$(date -Iseconds)",
@@ -89,7 +137,7 @@ EOF
 
 1. Clone the repository if not already cloned:
    ```bash
-   git clone https://github.com/{github_repo} {clone_path}
+   git clone https://github.com/{self.github_repo} {self.clone_path}
    ```
 
 2. Check for PROJECT.md:
@@ -99,22 +147,22 @@ EOF
 
 3. Create GitHub labels:
    ```bash
-   gh label create "status:pending" --color "fbca04" --repo {github_repo} --force
-   gh label create "status:in-progress" --color "0e8a16" --repo {github_repo} --force
-   gh label create "status:in-review" --color "6f42c1" --repo {github_repo} --force
-   gh label create "priority:high" --color "d73a4a" --repo {github_repo} --force
-   gh label create "priority:medium" --color "fbca04" --repo {github_repo} --force
-   gh label create "priority:low" --color "0e8a16" --repo {github_repo} --force
+   gh label create "status:pending" --color "fbca04" --repo {self.github_repo} --force
+   gh label create "status:in-progress" --color "0e8a16" --repo {self.github_repo} --force
+   gh label create "status:in-review" --color "6f42c1" --repo {self.github_repo} --force
+   gh label create "priority:high" --color "d73a4a" --repo {self.github_repo} --force
+   gh label create "priority:medium" --color "fbca04" --repo {self.github_repo} --force
+   gh label create "priority:low" --color "0e8a16" --repo {self.github_repo} --force
    ```
 
 4. Create issues for each task based on PROJECT.md:
    ```bash
-   gh issue create --repo {github_repo} --title "Task title" --body "Description" --label "status:pending,priority:medium"
+   gh issue create --repo {self.github_repo} --title "Task title" --body "Description" --label "status:pending,priority:medium"
    ```
 
 5. Create assignee labels for each programmer:
    ```bash
-{chr(10).join(f'   gh label create "assignee:{slug}" --color "0366d6" --repo {github_repo} --force' for _, slug in programmer_names)}
+{assignee_labels}
    ```
 
 6. Assign initial tasks to programmers by adding assignee labels to issues
@@ -128,9 +176,9 @@ After setup is complete, tell the user to run these commands in separate termina
 **Reviewer:**
 ```bash
 uv run python -m softfoundry.agents.reviewer \\
-    --github-repo {github_repo} \\
-    --clone-path {clone_path} \\
-    --project {project}
+    --github-repo {self.github_repo} \\
+    --clone-path {self.clone_path} \\
+    --project {self.config.project}
 ```
 
 Then ask the user to type "ready" when they have started all the agents.
@@ -141,13 +189,13 @@ Once agents are running:
 
 1. Check agent status files:
    ```bash
-   cat ~/.softfoundry/agents/{project}/*.status 2>/dev/null || echo "No status files yet"
+   cat ~/.softfoundry/agents/{self.config.project}/*.status 2>/dev/null || echo "No status files yet"
    ```
 
 2. Check GitHub for progress:
    ```bash
-   gh issue list --repo {github_repo} --state open --json number,title,labels
-   gh pr list --repo {github_repo} --state open --json number,title,state
+   gh issue list --repo {self.github_repo} --state open --json number,title,labels
+   gh pr list --repo {self.github_repo} --state open --json number,title,state
    ```
 
 3. Report progress to the user
@@ -164,46 +212,66 @@ The user will respond, and you can continue from there.
 Remember: Let Claude handle Git and GitHub operations directly using `gh` and `git` CLI.
 """
 
+    def get_initial_prompt(self) -> str:
+        """Build the first prompt, including crash-recovery context."""
+        resume_context = self._get_resume_context()
+        return f"""Start managing the {self.config.project} project.
 
-class GracefulExit(Exception):
-    """Raised when user requests graceful shutdown."""
+GitHub repo: {self.github_repo}
+Clone path: {self.clone_path}
+Number of programmers: {self.num_programmers}
 
-    pass
+{resume_context}
+
+Begin with Phase 1: Setup. Check if the repo is cloned, verify PROJECT.md exists,
+create issues for tasks, then move to Phase 2 to instruct the user to start agents.
+"""
+
+    def _get_resume_context(self) -> str:
+        """Check status file for crash recovery context."""
+        existing_status = self.read_status()
+        if not existing_status:
+            return ""
+
+        status = existing_status.get("status", "")
+        if status.startswith("exited:"):
+            return ""  # Clean exit, no recovery needed
+
+        if existing_status.get("details"):
+            return f"""IMPORTANT: You previously crashed or were interrupted.
+Your last status was: {status}
+You were doing: {existing_status.get("details")}
+Check the current state and continue from where you left off."""
+
+        return ""
+
+    def is_complete(self, result: ResultMessage) -> bool:
+        """Check if the project is complete."""
+        return result.result is not None and "project complete" in result.result.lower()
+
+    def get_continuation_prompt(self) -> str:
+        """Return the prompt to keep the agent monitoring."""
+        return "Continue monitoring. Check agent status files and GitHub state. Report progress."
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPTIONAL OVERRIDES
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_idle_interval(self) -> int | None:
+        """Wait 60 seconds between monitoring cycles."""
+        return POLL_INTERVAL
+
+    def on_complete(self) -> None:
+        """Handle completion with custom message."""
+        super().on_complete()
+        self.printer.console.print(
+            "[bold green]Project completed successfully![/bold green]"
+        )
 
 
-class ImmediateExit(Exception):
-    """Raised when user requests immediate shutdown."""
-
-    pass
-
-
-def setup_signal_handlers() -> dict[str, bool]:
-    """Set up signal handlers for graceful shutdown."""
-    state = {"shutdown_requested": False, "query_running": False}
-
-    def handler(signum: int, frame: object) -> None:
-        if state["shutdown_requested"]:
-            print("\nImmediate shutdown requested.")
-            raise ImmediateExit()
-        else:
-            state["shutdown_requested"] = True
-            if state["query_running"]:
-                print("\nShutdown requested. Waiting for current query to complete...")
-                print("Press Ctrl+C again to exit immediately.")
-            else:
-                raise GracefulExit()
-
-    signal.signal(signal.SIGINT, handler)
-    return state
-
-
-def extract_assistant_text(message: AssistantMessage) -> str:
-    """Extract text content from an AssistantMessage."""
-    texts = []
-    for block in message.content:
-        if isinstance(block, TextBlock):
-            texts.append(block.text)
-    return "\n".join(texts)
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def run_manager(
@@ -226,9 +294,6 @@ async def run_manager(
         new_session: If True, always start a new session.
         max_iterations: Maximum loop iterations (safety limit).
     """
-    printer = create_printer(verbosity)
-    shutdown_state = setup_signal_handlers()
-
     # Prompt for required values if not provided
     if not github_repo:
         github_repo = input("GitHub repository (OWNER/REPO): ").strip()
@@ -247,213 +312,17 @@ async def run_manager(
     if not clone_path:
         clone_path = f"castings/{project}"
 
-    # Initialize status file
-    status_path = get_status_path(project, "manager")
-    update_status(
-        status_path,
-        status="starting",
-        details="Initializing manager agent",
-        agent_type="manager",
-        project=project,
-    )
-
-    # Session management
-    session_manager = SessionManager(project)
-    existing_session = session_manager.get_session(AGENT_TYPE, "manager")
-    current_session_id: str | None = None
-
-    if existing_session:
-        if new_session:
-            session_manager.delete_session(AGENT_TYPE, "manager")
-            printer.console.print("Deleted existing session.")
-        elif resume:
-            current_session_id = existing_session.session_id
-            printer.console.print("Resuming previous session...")
-        else:
-            printer.console.print("Found previous session:")
-            print(format_session_info(existing_session))
-            response = input("Continue previous session? [y/N]: ").strip().lower()
-            if response == "y":
-                current_session_id = existing_session.session_id
-                printer.console.print("Resuming session...")
-            else:
-                session_manager.delete_session(AGENT_TYPE, "manager")
-                printer.console.print("Starting new session...")
-    elif resume:
-        print("Error: No existing session found.", file=sys.stderr)
-        print("Run without --resume to start a new session.", file=sys.stderr)
-        sys.exit(1)
-
-    # Check for self-awareness (crash recovery)
-    existing_status = read_status(status_path)
-    resume_context = ""
-    if existing_status and existing_status.get("status", "").startswith("exited:"):
-        # Agent had exited, starting fresh
-        pass
-    elif existing_status and existing_status.get("details"):
-        resume_context = f"""
-IMPORTANT: You previously crashed or were interrupted.
-Your last status was: {existing_status.get("status")}
-You were doing: {existing_status.get("details")}
-Check the current state and continue from where you left off.
-"""
-
-    # Build system prompt
-    system_prompt = get_system_prompt(
-        project=project,
+    agent = ManagerAgent(
         github_repo=github_repo,
         clone_path=clone_path,
-        status_path=status_path,
         num_programmers=num_programmers,
+        project=project,
+        resume=resume,
+        new_session=new_session,
+        verbosity=verbosity,
+        max_iterations=max_iterations,
     )
-
-    # Initial prompt
-    initial_prompt = f"""Start managing the {project} project.
-
-GitHub repo: {github_repo}
-Clone path: {clone_path}
-Number of programmers: {num_programmers}
-
-{resume_context}
-
-Begin with Phase 1: Setup. Check if the repo is cloned, verify PROJECT.md exists,
-create issues for tasks, then move to Phase 2 to instruct the user to start agents.
-"""
-
-    # Build options
-    options = ClaudeAgentOptions(
-        allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
-        permission_mode="acceptEdits",
-        resume=current_session_id,
-        system_prompt=system_prompt,
-        cwd=str(Path(clone_path).resolve()) if Path(clone_path).exists() else None,
-    )
-
-    # Main loop using ClaudeSDKClient
-    iteration = 0
-    try:
-        async with ClaudeSDKClient(options=options) as client:
-            # Send initial prompt
-            await client.query(initial_prompt)
-
-            while iteration < max_iterations:
-                iteration += 1
-
-                if shutdown_state["shutdown_requested"]:
-                    printer.console.print(
-                        "[yellow]Shutting down gracefully...[/yellow]"
-                    )
-                    update_status(
-                        status_path,
-                        status="exited:terminated",
-                        details="User requested shutdown",
-                    )
-                    break
-
-                # Collect response
-                last_assistant_text = ""
-                shutdown_state["query_running"] = True
-                try:
-                    async for message in client.receive_response():
-                        printer.print_message(message)
-
-                        if isinstance(message, AssistantMessage):
-                            last_assistant_text = extract_assistant_text(message)
-
-                        if isinstance(message, ResultMessage):
-                            # Save session for crash recovery
-                            session_info = session_manager.create_session_info(
-                                session_id=message.session_id,
-                                agent_name="manager",
-                                agent_type=AGENT_TYPE,
-                                num_turns=message.num_turns,
-                                total_cost_usd=message.total_cost_usd,
-                            )
-                            session_manager.save_session(session_info)
-
-                            # Check if project is complete
-                            if (
-                                message.result
-                                and "project complete" in message.result.lower()
-                            ):
-                                printer.console.print(
-                                    "[bold green]Project completed successfully![/bold green]"
-                                )
-                                update_status(
-                                    status_path,
-                                    status="exited:success",
-                                    details="Project completed",
-                                )
-                                return
-                finally:
-                    shutdown_state["query_running"] = False
-
-                if shutdown_state["shutdown_requested"]:
-                    printer.console.print(
-                        "[yellow]Shutting down gracefully...[/yellow]"
-                    )
-                    update_status(
-                        status_path,
-                        status="exited:terminated",
-                        details="User requested shutdown",
-                    )
-                    break
-
-                # Determine next action: user input or continue monitoring
-                if needs_user_input(last_assistant_text):
-                    # Interactive: wait for user input
-                    printer.console.print("[cyan]Waiting for your input...[/cyan]")
-                    user_input = read_multiline_input().strip()
-                    if user_input:
-                        await client.query(user_input)
-                    else:
-                        # Empty input, ask to continue
-                        await client.query("Please continue.")
-                else:
-                    # Non-interactive: wait and continue monitoring
-                    printer.console.print(
-                        f"[dim]Next check in {POLL_INTERVAL}s...[/dim]"
-                    )
-                    try:
-                        await asyncio.sleep(POLL_INTERVAL)
-                    except asyncio.CancelledError:
-                        break
-                    await client.query(
-                        "Continue monitoring. Check agent status files and GitHub state. Report progress."
-                    )
-
-    except GracefulExit:
-        printer.console.print("[yellow]Exiting...[/yellow]")
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details="User requested graceful exit",
-        )
-    except ImmediateExit:
-        printer.console.print("[red]Immediate exit.[/red]")
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details="User requested immediate exit",
-        )
-        sys.exit(1)
-    except Exception as e:
-        update_status(
-            status_path,
-            status="exited:error",
-            details=f"Error: {e}",
-        )
-        raise
-
-    if iteration >= max_iterations:
-        printer.console.print(
-            f"[yellow]Reached maximum iterations ({max_iterations}). Exiting.[/yellow]"
-        )
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details=f"Reached max iterations: {max_iterations}",
-        )
+    await agent.run()
 
 
 def main() -> None:

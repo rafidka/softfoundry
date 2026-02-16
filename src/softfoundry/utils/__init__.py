@@ -2,6 +2,13 @@
 
 from softfoundry.utils.input import read_multiline_input
 from softfoundry.utils.llm import extract_question, needs_user_input
+from softfoundry.utils.loop import (
+    Agent,
+    AgentConfig,
+    GracefulExit,
+    ImmediateExit,
+    extract_assistant_text,
+)
 from softfoundry.utils.output import MessagePrinter, Verbosity, create_printer
 from softfoundry.utils.sessions import (
     SESSIONS_DIR,
@@ -23,6 +30,10 @@ from softfoundry.utils.status import (
 )
 
 __all__ = [
+    "Agent",
+    "AgentConfig",
+    "GracefulExit",
+    "ImmediateExit",
     "MessagePrinter",
     "SESSIONS_DIR",
     "SessionInfo",
@@ -31,6 +42,7 @@ __all__ = [
     "STATUS_DIR",
     "Verbosity",
     "create_printer",
+    "extract_assistant_text",
     "extract_question",
     "format_session_info",
     "get_agent_pid",

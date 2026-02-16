@@ -3,63 +3,100 @@
 import argparse
 import asyncio
 import os
-import signal
-import sys
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    ResultMessage,
-    TextBlock,
-)
+from claude_agent_sdk import ResultMessage
 
-from softfoundry.utils.input import read_multiline_input
-from softfoundry.utils.llm import needs_user_input
-from softfoundry.utils.output import create_printer
-from softfoundry.utils.sessions import SessionManager, format_session_info
-from softfoundry.utils.status import (
-    get_status_path,
-    read_status,
-    sanitize_name,
-    update_status,
-)
+from softfoundry.utils.loop import Agent, AgentConfig
+from softfoundry.utils.status import sanitize_name
 
 AGENT_TYPE = "programmer"
-POLL_INTERVAL = 30  # seconds to wait when idle
 DEFAULT_MAX_ITERATIONS = 100
 
 
-def get_system_prompt(
-    name: str,
-    project: str,
-    github_repo: str,
-    clone_path: str,
-    worktree_path: str,
-    status_path: Path,
-) -> str:
-    """Generate the system prompt for the programmer agent."""
-    name_slug = sanitize_name(name)
+class ProgrammerAgent(Agent):
+    """Programmer agent that works on GitHub issues and creates PRs.
 
-    return f"""You are {name}, a programmer working on the {project} project.
+    This agent:
+    1. Finds tasks assigned to it via GitHub labels
+    2. Works on tasks in a git worktree
+    3. Creates PRs for completed work
+    4. Addresses review feedback
+    5. Exits when all tasks are complete
+    """
 
-GitHub repo: {github_repo}
-Main clone: {clone_path}
-Your worktree: {worktree_path}
-Status file: {status_path}
-Your assignee label: assignee:{name_slug}
+    def __init__(
+        self,
+        name: str,
+        github_repo: str,
+        clone_path: str,
+        project: str,
+        resume: bool = False,
+        new_session: bool = False,
+        verbosity: str = "medium",
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    ):
+        """Initialize the programmer agent.
+
+        Args:
+            name: Programmer name (e.g., "Alice Chen").
+            github_repo: GitHub repository in OWNER/REPO format.
+            clone_path: Path to the main git clone.
+            project: Project name.
+            resume: If True, automatically resume existing session.
+            new_session: If True, force a new session.
+            verbosity: Output verbosity level.
+            max_iterations: Maximum loop iterations.
+        """
+        # Store agent-specific state
+        self.name = name
+        self.name_slug = sanitize_name(name)
+        self.github_repo = github_repo
+        self.clone_path = clone_path
+        self.worktree_path = f"{clone_path}-{self.name_slug}"
+
+        # Determine working directory
+        cwd = self.worktree_path if Path(self.worktree_path).exists() else clone_path
+
+        # Build config and delegate to parent
+        config = AgentConfig(
+            project=project,
+            agent_type=AGENT_TYPE,
+            agent_name=name,
+            allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+            permission_mode="acceptEdits",
+            cwd=cwd,
+            max_iterations=max_iterations,
+            resume=resume,
+            new_session=new_session,
+            verbosity=verbosity,
+        )
+        super().__init__(config)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ABSTRACT METHOD IMPLEMENTATIONS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_system_prompt(self) -> str:
+        """Generate the system prompt for the programmer agent."""
+        return f"""You are {self.name}, a programmer working on the {self.config.project} project.
+
+GitHub repo: {self.github_repo}
+Main clone: {self.clone_path}
+Your worktree: {self.worktree_path}
+Status file: {self._status_path}
+Your assignee label: assignee:{self.name_slug}
 
 ## Status File Updates
 
 CRITICAL: You MUST update your status file frequently using Bash:
 
 ```bash
-cat > {status_path} << 'EOF'
+cat > {self._status_path} << 'EOF'
 {{
   "agent_type": "programmer",
-  "name": "{name}",
-  "project": "{project}",
+  "name": "{self.name}",
+  "project": "{self.config.project}",
   "status": "working",
   "details": "Description of what you're doing",
   "current_issue": 3,
@@ -77,14 +114,14 @@ Status values: starting, idle, working, waiting_review, addressing_feedback, exi
 ### 1. Find Tasks Assigned to You
 
 ```bash
-gh issue list --repo {github_repo} --label "assignee:{name_slug}" --label "status:pending" --json number,title,body
+gh issue list --repo {self.github_repo} --label "assignee:{self.name_slug}" --label "status:pending" --json number,title,body
 ```
 
 ### 2. If No Assigned Tasks, Help Others
 
 Pick any unassigned pending task:
 ```bash
-gh issue list --repo {github_repo} --label "status:pending" --json number,title,body
+gh issue list --repo {self.github_repo} --label "status:pending" --json number,title,body
 ```
 
 Take the first one that doesn't have another programmer's assignee label.
@@ -93,7 +130,7 @@ Take the first one that doesn't have another programmer's assignee label.
 
 Check if project is complete:
 ```bash
-gh issue list --repo {github_repo} --state open --json number
+gh issue list --repo {self.github_repo} --state open --json number
 ```
 
 If no open issues, exit gracefully with status "exited:success".
@@ -102,33 +139,33 @@ If no open issues, exit gracefully with status "exited:success".
 
 a. Create your worktree (if not exists):
 ```bash
-cd {clone_path}
+cd {self.clone_path}
 git fetch origin
-git worktree add {worktree_path} -b feature/issue-N-slug origin/main
+git worktree add {self.worktree_path} -b feature/issue-N-slug origin/main
 ```
 
 Or if worktree exists, just create a new branch:
 ```bash
-cd {worktree_path}
+cd {self.worktree_path}
 git fetch origin
 git checkout -b feature/issue-N-slug origin/main
 ```
 
 b. Update issue labels:
 ```bash
-gh issue edit N --repo {github_repo} --remove-label "status:pending" --add-label "status:in-progress"
+gh issue edit N --repo {self.github_repo} --remove-label "status:pending" --add-label "status:in-progress"
 ```
 
 c. Comment on the issue:
 ```bash
-gh issue comment N --repo {github_repo} --body "Starting implementation"
+gh issue comment N --repo {self.github_repo} --body "Starting implementation"
 ```
 
 d. Update your status file with current_issue
 
 ### 5. Implement the Task
 
-- Work in your worktree: {worktree_path}
+- Work in your worktree: {self.worktree_path}
 - Follow the project's coding standards
 - Write tests if applicable
 - Commit frequently with clear messages
@@ -142,7 +179,7 @@ Periodically update:
 When implementation is complete:
 
 ```bash
-cd {worktree_path}
+cd {self.worktree_path}
 git add -A
 git commit -m "feat: description of changes"
 git push -u origin feature/issue-N-slug
@@ -150,7 +187,7 @@ git push -u origin feature/issue-N-slug
 
 Create the PR:
 ```bash
-gh pr create --repo {github_repo} --title "Title" --body "## Summary
+gh pr create --repo {self.github_repo} --title "Title" --body "## Summary
 
 Description
 
@@ -159,7 +196,7 @@ Closes #N"
 
 Update labels:
 ```bash
-gh issue edit N --repo {github_repo} --remove-label "status:in-progress" --add-label "status:in-review"
+gh issue edit N --repo {self.github_repo} --remove-label "status:in-progress" --add-label "status:in-review"
 ```
 
 Update your status file with current_pr and status "waiting_review".
@@ -168,18 +205,18 @@ Update your status file with current_pr and status "waiting_review".
 
 Check PR status:
 ```bash
-gh pr view PR_NUMBER --repo {github_repo} --json state,reviewDecision,reviews
+gh pr view PR_NUMBER --repo {self.github_repo} --json state,reviewDecision,reviews
 ```
 
 - If `reviewDecision` is "APPROVED" and merged: clean up and find next task
 - If `reviewDecision` is "CHANGES_REQUESTED": address feedback and push updates
-- If still waiting: check again in {POLL_INTERVAL} seconds
+- If still waiting: check again in 30 seconds
 
 ### 8. Handle Conflicts
 
 If PR has conflicts:
 ```bash
-cd {worktree_path}
+cd {self.worktree_path}
 git fetch origin
 git rebase origin/main
 # Resolve conflicts if any
@@ -189,8 +226,8 @@ git push --force-with-lease
 ### 9. Clean Up After Merge
 
 ```bash
-cd {clone_path}
-git worktree remove {worktree_path} --force
+cd {self.clone_path}
+git worktree remove {self.worktree_path} --force
 git branch -D feature/issue-N-slug
 ```
 
@@ -205,46 +242,77 @@ Or just create a new branch for the next task in your worktree.
 - If you need clarification on a task, ask the user
 """
 
+    def get_initial_prompt(self) -> str:
+        """Build the first prompt, including crash-recovery context."""
+        resume_context = self._get_resume_context()
+        return f"""Start working as {self.name} on the {self.config.project} project.
 
-class GracefulExit(Exception):
-    """Raised when user requests graceful shutdown."""
+GitHub repo: {self.github_repo}
+Clone path: {self.clone_path}
+Your worktree: {self.worktree_path}
 
-    pass
+{resume_context}
+
+Find a task to work on and start implementing it.
+"""
+
+    def _get_resume_context(self) -> str:
+        """Check status file for crash recovery context."""
+        existing_status = self.read_status()
+        if not existing_status:
+            return ""
+
+        status = existing_status.get("status", "")
+        if status.startswith("exited:"):
+            return ""  # Clean exit, no recovery needed
+
+        issue_num = existing_status.get("current_issue")
+        pr_num = existing_status.get("current_pr")
+
+        if issue_num:
+            pr_info = (
+                f"You had created PR #{pr_num}." if pr_num else "No PR was created yet."
+            )
+            return f"""IMPORTANT: You previously crashed or were interrupted.
+Your last status was: {status}
+You were working on issue #{issue_num}.
+{pr_info}
+Details: {existing_status.get("details", "N/A")}
+
+Check the current state of issue #{issue_num} and continue from where you left off."""
+
+        return ""
+
+    def is_complete(self, result: ResultMessage) -> bool:
+        """Check if the programmer has finished all tasks."""
+        return result.result is not None and "exited:success" in result.result.lower()
+
+    def get_continuation_prompt(self) -> str:
+        """Return the prompt to keep the agent working."""
+        return "Continue working. Check task status, implement, or check for review feedback."
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # OPTIONAL OVERRIDES
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_idle_interval(self) -> int | None:
+        """Wait 30s if idle or waiting for PR review."""
+        current_status = self.read_status()
+        if current_status:
+            status = current_status.get("status", "")
+            if status in ("idle", "waiting_review"):
+                return 30
+        return None
+
+    def on_complete(self) -> None:
+        """Handle completion with custom message."""
+        super().on_complete()
+        self.printer.console.print("[bold green]All tasks completed![/bold green]")
 
 
-class ImmediateExit(Exception):
-    """Raised when user requests immediate shutdown."""
-
-    pass
-
-
-def setup_signal_handlers() -> dict[str, bool]:
-    """Set up signal handlers for graceful shutdown."""
-    state = {"shutdown_requested": False, "query_running": False}
-
-    def handler(signum: int, frame: object) -> None:
-        if state["shutdown_requested"]:
-            print("\nImmediate shutdown requested.")
-            raise ImmediateExit()
-        else:
-            state["shutdown_requested"] = True
-            if state["query_running"]:
-                print("\nShutdown requested. Waiting for current query to complete...")
-                print("Press Ctrl+C again to exit immediately.")
-            else:
-                raise GracefulExit()
-
-    signal.signal(signal.SIGINT, handler)
-    return state
-
-
-def extract_assistant_text(message: AssistantMessage) -> str:
-    """Extract text content from an AssistantMessage."""
-    texts = []
-    for block in message.content:
-        if isinstance(block, TextBlock):
-            texts.append(block.text)
-    return "\n".join(texts)
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 async def run_programmer(
@@ -269,232 +337,17 @@ async def run_programmer(
         new_session: If True, always start a new session.
         max_iterations: Maximum loop iterations (safety limit).
     """
-    printer = create_printer(verbosity)
-    shutdown_state = setup_signal_handlers()
-
-    name_slug = sanitize_name(name)
-    worktree_path = f"{clone_path}-{name_slug}"
-
-    # Initialize status file
-    status_path = get_status_path(project, "programmer", name)
-    update_status(
-        status_path,
-        status="starting",
-        details="Initializing programmer agent",
-        agent_type="programmer",
+    agent = ProgrammerAgent(
         name=name,
-        project=project,
-    )
-
-    # Session management
-    session_manager = SessionManager(project)
-    existing_session = session_manager.get_session(AGENT_TYPE, name)
-    current_session_id: str | None = None
-
-    if existing_session:
-        if new_session:
-            session_manager.delete_session(AGENT_TYPE, name)
-            printer.console.print(f"Deleted existing session for {name}.")
-        elif resume:
-            current_session_id = existing_session.session_id
-            printer.console.print(f"Resuming session for {name}...")
-        else:
-            printer.console.print(f"Found previous session for {name}:")
-            print(format_session_info(existing_session))
-            response = input("Continue previous session? [y/N]: ").strip().lower()
-            if response == "y":
-                current_session_id = existing_session.session_id
-                printer.console.print("Resuming session...")
-            else:
-                session_manager.delete_session(AGENT_TYPE, name)
-                printer.console.print("Starting new session...")
-    elif resume:
-        print(f"Error: No existing session found for {name}.", file=sys.stderr)
-        print("Run without --resume to start a new session.", file=sys.stderr)
-        sys.exit(1)
-
-    # Check for self-awareness (crash recovery)
-    existing_status = read_status(status_path)
-    resume_context = ""
-    if existing_status:
-        status = existing_status.get("status", "")
-        if status.startswith("exited:"):
-            # Agent had exited, starting fresh
-            pass
-        elif existing_status.get("current_issue"):
-            issue_num = existing_status.get("current_issue")
-            pr_num = existing_status.get("current_pr")
-            resume_context = f"""
-IMPORTANT: You previously crashed or were interrupted.
-Your last status was: {status}
-You were working on issue #{issue_num}.
-{"You had created PR #" + str(pr_num) + "." if pr_num else "No PR was created yet."}
-Details: {existing_status.get("details", "N/A")}
-
-Check the current state of issue #{issue_num} and continue from where you left off.
-"""
-
-    # Build system prompt
-    system_prompt = get_system_prompt(
-        name=name,
-        project=project,
         github_repo=github_repo,
         clone_path=clone_path,
-        worktree_path=worktree_path,
-        status_path=status_path,
+        project=project,
+        resume=resume,
+        new_session=new_session,
+        verbosity=verbosity,
+        max_iterations=max_iterations,
     )
-
-    # Initial prompt
-    initial_prompt = f"""Start working as {name} on the {project} project.
-
-GitHub repo: {github_repo}
-Clone path: {clone_path}
-Your worktree: {worktree_path}
-
-{resume_context}
-
-Find a task to work on and start implementing it.
-"""
-
-    # Build options - work from worktree if it exists, otherwise clone path
-    cwd = worktree_path if Path(worktree_path).exists() else clone_path
-    options = ClaudeAgentOptions(
-        allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
-        permission_mode="acceptEdits",
-        resume=current_session_id,
-        system_prompt=system_prompt,
-        cwd=str(Path(cwd).resolve()) if Path(cwd).exists() else None,
-    )
-
-    # Main loop using ClaudeSDKClient
-    iteration = 0
-    try:
-        async with ClaudeSDKClient(options=options) as client:
-            # Send initial prompt
-            await client.query(initial_prompt)
-
-            while iteration < max_iterations:
-                iteration += 1
-
-                if shutdown_state["shutdown_requested"]:
-                    printer.console.print(
-                        "[yellow]Shutting down gracefully...[/yellow]"
-                    )
-                    update_status(
-                        status_path,
-                        status="exited:terminated",
-                        details="User requested shutdown",
-                    )
-                    break
-
-                # Collect response
-                last_assistant_text = ""
-                shutdown_state["query_running"] = True
-                try:
-                    async for message in client.receive_response():
-                        printer.print_message(message)
-
-                        if isinstance(message, AssistantMessage):
-                            last_assistant_text = extract_assistant_text(message)
-
-                        if isinstance(message, ResultMessage):
-                            # Save session for crash recovery
-                            session_info = session_manager.create_session_info(
-                                session_id=message.session_id,
-                                agent_name=name,
-                                agent_type=AGENT_TYPE,
-                                num_turns=message.num_turns,
-                                total_cost_usd=message.total_cost_usd,
-                            )
-                            session_manager.save_session(session_info)
-
-                            # Check if agent decided to exit
-                            if (
-                                message.result
-                                and "exited:success" in message.result.lower()
-                            ):
-                                printer.console.print(
-                                    "[bold green]All tasks completed![/bold green]"
-                                )
-                                update_status(
-                                    status_path,
-                                    status="exited:success",
-                                    details="All tasks completed",
-                                )
-                                return
-                finally:
-                    shutdown_state["query_running"] = False
-
-                if shutdown_state["shutdown_requested"]:
-                    printer.console.print(
-                        "[yellow]Shutting down gracefully...[/yellow]"
-                    )
-                    update_status(
-                        status_path,
-                        status="exited:terminated",
-                        details="User requested shutdown",
-                    )
-                    break
-
-                # Determine next action: user input or continue working
-                if needs_user_input(last_assistant_text):
-                    # Interactive: wait for user input
-                    printer.console.print("[cyan]Waiting for your input...[/cyan]")
-                    user_input = read_multiline_input().strip()
-                    if user_input:
-                        await client.query(user_input)
-                    else:
-                        await client.query("Please continue.")
-                else:
-                    # Check current status to determine wait time
-                    current_status = read_status(status_path)
-                    if current_status:
-                        status = current_status.get("status", "")
-                        if status in ("idle", "waiting_review"):
-                            printer.console.print(
-                                f"[dim]Status: {status}. Checking again in {POLL_INTERVAL}s...[/dim]"
-                            )
-                            try:
-                                await asyncio.sleep(POLL_INTERVAL)
-                            except asyncio.CancelledError:
-                                break
-
-                    await client.query(
-                        "Continue working. Check task status, implement, or check for review feedback."
-                    )
-
-    except GracefulExit:
-        printer.console.print("[yellow]Exiting...[/yellow]")
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details="User requested graceful exit",
-        )
-    except ImmediateExit:
-        printer.console.print("[red]Immediate exit.[/red]")
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details="User requested immediate exit",
-        )
-        sys.exit(1)
-    except Exception as e:
-        update_status(
-            status_path,
-            status="exited:error",
-            details=f"Error: {e}",
-        )
-        raise
-
-    if iteration >= max_iterations:
-        printer.console.print(
-            f"[yellow]Reached maximum iterations ({max_iterations}). Exiting.[/yellow]"
-        )
-        update_status(
-            status_path,
-            status="exited:terminated",
-            details=f"Reached max iterations: {max_iterations}",
-        )
+    await agent.run()
 
 
 def main() -> None:

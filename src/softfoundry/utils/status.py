@@ -1,8 +1,8 @@
 """Agent status file management for monitoring and coordination.
 
-Status files are stored at ~/.softfoundry/agents/{project}/ and contain
-JSON data about each agent's current state, allowing the manager to
-monitor agent health and restart failed agents.
+Status files are stored at ~/.softfoundry/agents/{prefix}/ and contain
+JSON data about each agent's current state, enabling monitoring of
+agent health and coordination between agents.
 """
 
 import json
@@ -29,22 +29,26 @@ def sanitize_name(name: str) -> str:
     return sanitized.strip("-")
 
 
-def get_status_path(project: str, agent_type: str, name: str | None = None) -> Path:
+def get_status_path(
+    prefix: str, agent_type: str, agent_name: str | None = None
+) -> Path:
     """Get path to an agent's status file.
 
     Args:
-        project: Project name (e.g., "scicalc").
+        prefix: Namespace for organizing status files (e.g., project name).
         agent_type: Type of agent ("manager", "programmer", "reviewer").
-        name: Agent name for programmer agents (e.g., "Alice Chen").
+        agent_name: Agent name (e.g., "Alice Chen"). If provided and different
+            from agent_type, it's included in the filename.
 
     Returns:
         Path to the status file.
     """
-    dir_path = STATUS_DIR / project
+    dir_path = STATUS_DIR / prefix
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    if name:
-        filename = f"{agent_type}-{sanitize_name(name)}.status"
+    # Include agent_name in filename if it's different from agent_type
+    if agent_name and agent_name != agent_type and agent_name != "default":
+        filename = f"{agent_type}-{sanitize_name(agent_name)}.status"
     else:
         filename = f"{agent_type}.status"
 
@@ -198,21 +202,21 @@ def get_agent_pid(status_path: Path) -> int | None:
     return int(pid) if pid is not None else None
 
 
-def list_agent_statuses(project: str) -> list[tuple[Path, dict[str, Any]]]:
-    """List all agent status files for a project.
+def list_agent_statuses(prefix: str) -> list[tuple[Path, dict[str, Any]]]:
+    """List all agent status files for a given prefix.
 
     Args:
-        project: Project name.
+        prefix: Namespace for organizing status files (e.g., project name).
 
     Returns:
         List of (path, data) tuples for each status file.
     """
-    project_dir = STATUS_DIR / project
-    if not project_dir.exists():
+    prefix_dir = STATUS_DIR / prefix
+    if not prefix_dir.exists():
         return []
 
     results = []
-    for status_file in project_dir.glob("*.status"):
+    for status_file in prefix_dir.glob("*.status"):
         data = read_status(status_file)
         if data:
             results.append((status_file, data))

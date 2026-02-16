@@ -21,7 +21,7 @@ class SessionInfo:
     session_id: str
     agent_name: str
     agent_type: str  # "manager", "programmer", or "reviewer"
-    project: str  # Project name (e.g., "scicalc")
+    prefix: str  # Namespace for organizing sessions (e.g., project name)
     last_run: str  # ISO timestamp
     num_turns: int
     total_cost_usd: float | None = None
@@ -31,16 +31,16 @@ class SessionManager:
     """Manages session persistence for agents.
 
     Sessions are stored centrally at ~/.softfoundry/sessions/.
-    Each agent has its own session file named `{agent_type}-{sanitized_name}-{project}.json`.
+    Each agent has its own session file named `{agent_type}-{sanitized_name}-{prefix}.json`.
     """
 
-    def __init__(self, project: str) -> None:
+    def __init__(self, prefix: str) -> None:
         """Initialize the session manager.
 
         Args:
-            project: The project name (e.g., "scicalc").
+            prefix: Namespace for organizing sessions (e.g., project name).
         """
-        self.project = project
+        self.prefix = prefix
         self.sessions_path = SESSIONS_DIR
 
     def _sanitize_name(self, name: str) -> str:
@@ -68,7 +68,7 @@ class SessionManager:
             Path to the session file.
         """
         sanitized_name = self._sanitize_name(agent_name)
-        filename = f"{agent_type}-{sanitized_name}-{self.project}.json"
+        filename = f"{agent_type}-{sanitized_name}-{self.prefix}.json"
         return self.sessions_path / filename
 
     def get_session(self, agent_type: str, agent_name: str) -> SessionInfo | None:
@@ -152,7 +152,7 @@ class SessionManager:
             session_id=session_id,
             agent_name=agent_name,
             agent_type=agent_type,
-            project=self.project,
+            prefix=self.prefix,
             last_run=datetime.now().isoformat(),
             num_turns=num_turns,
             total_cost_usd=total_cost_usd,
