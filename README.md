@@ -6,9 +6,17 @@ A multi-agent system for generating complete software projects end-to-end using 
 
 softfoundry employs multiple AI agents (Manager, Programmer, Reviewer) that collaborate to generate complete software projects. The system uses GitHub as the central coordination mechanism:
 
-- **Manager** - Sets up the project, creates GitHub issues for tasks, spawns programmer/reviewer agents, and monitors progress
+- **Manager** - Sets up the project, creates GitHub issues for tasks, guides the user to spawn programmer/reviewer agents, and monitors progress
 - **Programmers** - Work on assigned issues in git worktrees, create PRs when done
 - **Reviewer** - Reviews PRs, provides feedback or approves, merges approved code
+
+## Key Features
+
+- **Autonomous Development**: Agents work independently, picking up tasks and implementing them
+- **GitHub-Native Coordination**: Tasks tracked as issues, code changes as PRs
+- **Parallel Development**: Multiple programmers work in isolated git worktrees
+- **Crash Recovery**: Sessions and status files enable resumption after interruptions
+- **Health Monitoring**: Status files allow the manager to detect and restart failed agents
 
 ## Requirements
 
@@ -45,7 +53,7 @@ The manager will:
 - Clone the repository to `castings/{project}/`
 - Check for `PROJECT.md` (collaborate with you to create it if missing)
 - Create GitHub issues for each task
-- Spawn programmer and reviewer agents
+- Provide commands to start programmer and reviewer agents
 - Monitor progress until completion
 
 ### 2. With All Options Specified
@@ -57,26 +65,56 @@ uv run python -m softfoundry.agents.manager \
     --num-programmers 2
 ```
 
+### 3. Start Programmer and Reviewer Agents
+
+After the manager completes setup, start the agents in separate terminals:
+
+```bash
+# Terminal 2: Programmer 1
+uv run python -m softfoundry.agents.programmer \
+    --name "Alice Chen" \
+    --github-repo myuser/myproject \
+    --clone-path castings/myproject \
+    --project myproject
+
+# Terminal 3: Programmer 2
+uv run python -m softfoundry.agents.programmer \
+    --name "Bob Smith" \
+    --github-repo myuser/myproject \
+    --clone-path castings/myproject \
+    --project myproject
+
+# Terminal 4: Reviewer
+uv run python -m softfoundry.agents.reviewer \
+    --github-repo myuser/myproject \
+    --clone-path castings/myproject \
+    --project myproject
+```
+
 ## How It Works
 
-1. **Setup Phase**
-   - Manager clones the GitHub repository
-   - Reads or creates `PROJECT.md` describing the project
-   - Creates labeled GitHub issues for each task
-   - Creates assignee labels for each programmer
+### Phase 1: Setup
 
-2. **Work Phase**
-   - Manager spawns programmer agents (each in their own worktree)
-   - Manager spawns reviewer agent
-   - Programmers pick up assigned tasks, implement them, create PRs
-   - Reviewer reviews PRs, requests changes or approves and merges
+1. Manager clones the GitHub repository
+2. Reads or creates `PROJECT.md` describing the project
+3. Creates labeled GitHub issues for each task
+4. Creates assignee labels for each programmer
 
-3. **Monitoring Phase**
-   - Manager monitors agent health via status files
-   - Restarts any stale or crashed agents
-   - Detects project completion when all issues are closed
+### Phase 2: Work
 
-## CLI Options
+1. Manager instructs user to start programmer and reviewer agents
+2. Programmers pick up assigned tasks (or help with unassigned ones)
+3. Each programmer works in their own git worktree
+4. Programmers create PRs when tasks are complete
+5. Reviewer reviews PRs, requests changes or approves and merges
+
+### Phase 3: Monitoring
+
+1. Manager monitors agent health via status files
+2. Checks GitHub for task completion status
+3. Detects project completion when all issues are closed
+
+## CLI Reference
 
 ### Manager
 
@@ -109,22 +147,42 @@ uv run python -m softfoundry.agents.manager \
 | `--project` | Project name (required) |
 | `--verbosity`, `--max-iterations`, `--resume`, `--new-session` | Same as manager |
 
+### Utility Commands
+
+```bash
+# Clear all sessions and status files
+uv run softfoundry-clear
+
+# Clear files for a specific project
+uv run softfoundry-clear --project myproject
+
+# Preview what would be deleted
+uv run softfoundry-clear --dry-run
+```
+
 ## Project Structure
 
 ```
 softfoundry/
 ├── src/softfoundry/
 │   ├── agents/           # Manager, Programmer, Reviewer agents
-│   └── utils/            # Shared utilities (output, sessions, status)
+│   ├── cli/              # CLI commands (clear)
+│   └── utils/            # Shared utilities
+│       ├── input.py      # Multi-line input handling
+│       ├── llm.py        # Question detection using Claude
+│       ├── output.py     # Rich console formatting
+│       ├── sessions.py   # Session persistence
+│       └── status.py     # Agent status management
 ├── castings/             # Generated project workspaces
 │   ├── {project}/        # Main git clone
 │   └── {project}-{name}/ # Programmer worktrees
-├── docs/
-│   └── IMPLEMENTATION_PLAN.md  # Full system design
+├── ARCHITECTURE.md       # Detailed system architecture
+├── claude-docs/          # Claude Agent SDK reference
+│   └── IMPLEMENTATION_PLAN.md  # Original design document
 └── pyproject.toml
 
 ~/.softfoundry/           # User-level data
-├── sessions/             # Session persistence
+├── sessions/             # Session persistence (crash recovery)
 └── agents/               # Agent status files
     └── {project}/
         ├── manager.status
@@ -144,6 +202,47 @@ The manager creates these labels on project setup:
 | `status:in-review` | PR awaiting review |
 | `priority:high/medium/low` | Task priority |
 
+## Session Management
+
+### Resume a Session
+
+If an agent crashes or is interrupted, it can resume from where it left off:
+
+```bash
+# Resume automatically
+uv run python -m softfoundry.agents.manager --resume
+
+# Will prompt if a session exists
+uv run python -m softfoundry.agents.manager
+```
+
+### Start Fresh
+
+To discard an existing session and start over:
+
+```bash
+uv run python -m softfoundry.agents.manager --new-session
+```
+
+### Clean Up
+
+To remove all session and status files:
+
+```bash
+uv run softfoundry-clear
+```
+
+## Agent Health Monitoring
+
+Agents write status files to `~/.softfoundry/agents/{project}/` that include:
+
+- Current status (working, idle, waiting_review, etc.)
+- Current issue or PR being worked on
+- Last update timestamp
+- Process ID
+
+The manager can detect stale agents (no update in 5+ minutes) and alert the user.
+
 ## Development
 
 ```bash
@@ -159,6 +258,10 @@ uv run pyright
 # Run tests
 uv run pytest
 ```
+
+## Architecture
+
+For detailed architecture documentation, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## License
 
