@@ -146,7 +146,18 @@ EOF
    - Ask questions about the project scope, tech stack, features
    - Write PROJECT.md to the repo root
 
-3. Create GitHub labels:
+3. Present the task plan for user verification:
+   - Analyze PROJECT.md and derive all tasks that need to be created as GitHub issues
+   - Present the plan as a numbered list with:
+     - Task title
+     - Brief description (1-2 sentences)
+     - Proposed priority (high/medium/low)
+   - Ask the user: "Are you happy with this plan, or do you have any suggestions?"
+   - WAIT for user response before proceeding
+   - If the user suggests changes, incorporate their feedback and present the revised plan
+   - Only proceed to the next step once the user confirms they are satisfied
+
+4. Create GitHub labels:
    ```bash
    gh label create "status:pending" --color "fbca04" --repo {self.github_repo} --force
    gh label create "status:in-progress" --color "0e8a16" --repo {self.github_repo} --force
@@ -156,17 +167,17 @@ EOF
    gh label create "priority:low" --color "0e8a16" --repo {self.github_repo} --force
    ```
 
-4. Create issues for each task based on PROJECT.md:
+5. Create issues for each task based on the approved plan:
    ```bash
    gh issue create --repo {self.github_repo} --title "Task title" --body "Description" --label "status:pending,priority:medium"
    ```
 
-5. Create assignee labels for each programmer:
+6. Create assignee labels for each programmer:
    ```bash
 {assignee_labels}
    ```
 
-6. Assign initial tasks to programmers by adding assignee labels to issues
+7. Assign initial tasks to programmers by adding assignee labels to issues
 
 ## Phase 2: Instruct User to Start Agents
 
