@@ -53,6 +53,7 @@ class ProgrammerAgent(Agent):
         self.name_slug = sanitize_name(name)
         self.github_repo = github_repo
         self.clone_path = clone_path
+        self.project = project
         self.worktree_path = f"{clone_path}-{self.name_slug}"
 
         # Determine working directory
@@ -60,7 +61,7 @@ class ProgrammerAgent(Agent):
 
         # Build config and delegate to parent
         config = AgentConfig(
-            project=project,
+            namespace=project,
             agent_type=AGENT_TYPE,
             agent_name=name,
             allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
@@ -79,7 +80,7 @@ class ProgrammerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the programmer agent."""
-        return f"""You are {self.name}, a programmer working on the {self.config.project} project.
+        return f"""You are {self.name}, a programmer working on the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Main clone: {self.clone_path}
@@ -96,7 +97,7 @@ cat > {self._status_path} << 'EOF'
 {{
   "agent_type": "programmer",
   "name": "{self.name}",
-  "project": "{self.config.project}",
+  "project": "{self.project}",
   "status": "working",
   "details": "Description of what you're doing",
   "current_issue": 3,
@@ -245,7 +246,7 @@ Or just create a new branch for the next task in your worktree.
     def get_initial_prompt(self) -> str:
         """Build the first prompt, including crash-recovery context."""
         resume_context = self._get_resume_context()
-        return f"""Start working as {self.name} on the {self.config.project} project.
+        return f"""Start working as {self.name} on the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}

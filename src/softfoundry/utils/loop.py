@@ -25,7 +25,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from softfoundry.utils.input import read_multiline_input
+from softfoundry.utils.interactive import InteractiveInput
 from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.sessions import SessionManager, format_session_info
@@ -42,6 +42,19 @@ class ImmediateExit(Exception):
     """Raised when user requests immediate shutdown (second Ctrl+C)."""
 
     pass
+
+
+@dataclass
+class TurnResult:
+    """Result of processing one agent turn.
+
+    Attributes:
+        should_exit: True if is_complete() returned True.
+        was_interrupted: True if the turn was interrupted by user input.
+    """
+
+    should_exit: bool = False
+    was_interrupted: bool = False
 
 
 def extract_assistant_text(message: AssistantMessage) -> str:
@@ -65,8 +78,7 @@ class AgentConfig:
     """Configuration for an agent.
 
     Attributes:
-        project: Namespace for sessions, logs, and status files.
-            This is NOT GitHub-specific; it's used to organize agent data.
+        namespace: Namespace for sessions, logs, and status files.
         agent_type: Category of agent (e.g., "manager", "programmer", "reviewer").
         agent_name: Instance name (e.g., "Alice Chen", "default").
         allowed_tools: List of tools the agent can use.
@@ -79,7 +91,7 @@ class AgentConfig:
     """
 
     # Identity & Namespacing
-    project: str
+    namespace: str
     agent_type: str
     agent_name: str = "default"
 
@@ -148,13 +160,13 @@ class Agent(ABC):
         self._printer = create_printer(config.verbosity)
 
         # Session management
-        self._session_manager = SessionManager(prefix=config.project)
+        self._session_manager = SessionManager(prefix=config.namespace)
         self._session_id: str | None = None
         self._resolve_session()
 
         # Status management
         self._status_path = get_status_path(
-            prefix=config.project,
+            prefix=config.namespace,
             agent_type=config.agent_type,
             agent_name=config.agent_name,
         )
@@ -164,6 +176,15 @@ class Agent(ABC):
         self._iteration = 0
         self._shutdown_state: dict[str, bool] = {}
         self._last_assistant_text = ""
+
+        # Interactive input and SDK client (set up later in run())
+        self._interactive: InteractiveInput | None = None
+        self._input_task: asyncio.Task[None] | None = None
+        self._client: ClaudeSDKClient | None = None
+
+        # User input handling (no queue - just a single pending input slot)
+        self._pending_input: str | None = None
+        self._is_turn_running = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # SESSION MANAGEMENT (handled by parent)
@@ -252,7 +273,7 @@ class Agent(ABC):
             details=details,
             agent_type=self.config.agent_type,
             name=self.config.agent_name,
-            project=self.config.project,
+            project=self.config.namespace,
             **extra,
         )
 
@@ -278,10 +299,9 @@ class Agent(ABC):
                 raise ImmediateExit()
             else:
                 self._shutdown_state["shutdown_requested"] = True
+                print("\nShutdown requested.")
                 if self._shutdown_state["query_running"]:
-                    print(
-                        "\nShutdown requested. Waiting for current query to complete..."
-                    )
+                    print("Waiting for current query to complete...")
                     print("Press Ctrl+C again to exit immediately.")
                 else:
                     raise GracefulExit()
@@ -405,7 +425,8 @@ class Agent(ABC):
     def on_shutdown(self, graceful: bool) -> None:
         """Called when the agent is shutting down via Ctrl+C.
 
-        Default implementation updates the status file and prints a message.
+        Default implementation updates the status file. For immediate shutdown
+        (second Ctrl+C), prints a message.
 
         Args:
             graceful: True if this is a graceful shutdown (first Ctrl+C),
@@ -415,9 +436,7 @@ class Agent(ABC):
             "exited:terminated",
             "User requested shutdown" if graceful else "Immediate exit",
         )
-        if graceful:
-            self._printer.console.print("[yellow]Exiting...[/yellow]")
-        else:
+        if not graceful:
             self._printer.console.print("[red]Immediate exit.[/red]")
 
     def on_error(self, error: Exception) -> None:
@@ -477,18 +496,66 @@ class Agent(ABC):
                 return str(cwd_path.resolve())
         return None
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # INPUT HANDLING
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _handle_user_input(self, text: str) -> None:
+        """Handle user input from the interactive input.
+
+        This is called by InteractiveInput when the user submits input.
+        The agent decides whether to interrupt the current turn or just
+        store the input for later processing.
+
+        Args:
+            text: The user's input text.
+        """
+        self._pending_input = text
+
+        if self._is_turn_running and self._client:
+            # Agent is busy - interrupt and process the input
+            self._printer.console.print(
+                f"[dim italic]Interrupting with: {text[:50]}{'...' if len(text) > 50 else ''}[/dim italic]"
+            )
+            # Create a task to call interrupt (we're in a sync callback)
+            asyncio.create_task(self._interrupt_current_turn())
+
+    async def _interrupt_current_turn(self) -> None:
+        """Interrupt the current turn."""
+        if self._client:
+            if self._interactive:
+                self._interactive.status = "interrupting"
+            await self._client.interrupt()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MAIN LOOP
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def run(self) -> None:
         """Main entry point - runs the agent loop.
 
         This method:
-        1. Sets up signal handlers
-        2. Creates the Claude SDK client
-        3. Sends the initial prompt
-        4. Loops until completion, shutdown, or max iterations
+        1. Verifies stdin is a TTY (required for interactive input)
+        2. Sets up signal handlers
+        3. Creates the Claude SDK client with interactive input
+        4. Sends the initial prompt
+        5. Loops until completion, shutdown, or max iterations
+
+        A persistent input prompt is shown at the bottom of the terminal.
+        Users can type while the agent is working. If they submit input
+        while the agent is busy, it interrupts and processes their input.
 
         Raises:
+            RuntimeError: If stdin is not a TTY.
             Exception: Re-raises any exception after calling on_error().
         """
+        # Require a TTY for interactive input
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Interactive mode requires a TTY. "
+                "Please run this agent in an interactive terminal."
+            )
+
         self._setup_signal_handlers()
 
         # Build Claude SDK options
@@ -500,92 +567,28 @@ class Agent(ABC):
             cwd=self._get_cwd(),
         )
 
+        # Create interactive input with our callback
+        self._interactive = InteractiveInput(
+            on_input=self._handle_user_input,
+            prompt="> ",
+        )
+
         try:
-            async with ClaudeSDKClient(options=options) as client:
-                # Send initial prompt
-                await client.query(self.get_initial_prompt())
+            async with self._interactive:
+                # Start the input listener as a background task
+                self._input_task = asyncio.create_task(self._interactive.run())
 
-                while self._iteration < self.config.max_iterations:
-                    self._iteration += 1
-
-                    # Check for shutdown before processing
-                    if self._shutdown_state.get("shutdown_requested"):
-                        self.on_shutdown(graceful=True)
-                        break
-
-                    # Receive and process messages
-                    self._last_assistant_text = ""
-                    self._shutdown_state["query_running"] = True
-                    should_exit = False
-
-                    try:
-                        async for message in client.receive_response():
-                            self._printer.print_message(message)
-
-                            if isinstance(message, AssistantMessage):
-                                text = extract_assistant_text(message)
-                                self._last_assistant_text = text
-                                self.on_assistant_message(message, text)
-
-                            if isinstance(message, ResultMessage):
-                                # Save session for crash recovery
-                                self._save_session(
-                                    session_id=message.session_id,
-                                    num_turns=message.num_turns,
-                                    cost_usd=message.total_cost_usd,
-                                )
-
-                                # Call hook
-                                self.on_result(message)
-
-                                # Check completion
-                                if self.is_complete(message):
-                                    self.on_complete()
-                                    should_exit = True
-                    finally:
-                        self._shutdown_state["query_running"] = False
-
-                    if should_exit:
-                        return
-
-                    # Check for shutdown after processing
-                    if self._shutdown_state.get("shutdown_requested"):
-                        self.on_shutdown(graceful=True)
-                        break
-
-                    # Determine next action
-                    if self.needs_user_input(self._last_assistant_text):
-                        # Wait for user input (required)
-                        self._printer.console.print(
-                            "[cyan]Waiting for your input...[/cyan]"
-                        )
-                        while True:
-                            user_input = read_multiline_input().strip()
-                            if user_input:
-                                await client.query(user_input)
-                                break
-                            else:
-                                self._printer.console.print(
-                                    "[yellow]Input required. Please provide a response.[/yellow]"
-                                )
-                    else:
-                        # Check if we should wait before continuing
-                        idle_interval = self.get_idle_interval()
-                        if idle_interval is not None and idle_interval > 0:
-                            self._printer.console.print(
-                                f"[dim]Waiting {idle_interval}s before continuing...[/dim]"
-                            )
-                            try:
-                                await asyncio.sleep(idle_interval)
-                            except asyncio.CancelledError:
-                                break
-
-                        # Send continuation prompt
-                        await client.query(self.get_continuation_prompt())
-
-                # Check if we hit max iterations
-                if self._iteration >= self.config.max_iterations:
-                    self.on_max_iterations()
+                try:
+                    await self._run_loop(options)
+                finally:
+                    # Cancel the input task
+                    if self._input_task and not self._input_task.done():
+                        self._input_task.cancel()
+                        try:
+                            await self._input_task
+                        except asyncio.CancelledError:
+                            pass
+                    self._interactive.stop()
 
         except GracefulExit:
             self.on_shutdown(graceful=True)
@@ -593,5 +596,222 @@ class Agent(ABC):
             self.on_shutdown(graceful=False)
             sys.exit(1)
         except Exception as e:
-            self.on_error(e)
-            raise
+            if self._shutdown_state.get("shutdown_requested"):
+                self.on_shutdown(graceful=True)
+            else:
+                self.on_error(e)
+                raise
+
+    async def _run_loop(self, options: ClaudeAgentOptions) -> None:
+        """Run the main agent loop.
+
+        Args:
+            options: The ClaudeAgentOptions for the SDK client.
+        """
+        assert self._interactive is not None
+
+        async with ClaudeSDKClient(options=options) as client:
+            self._client = client
+
+            try:
+                # Send initial prompt
+                await self._send_message(self.get_initial_prompt())
+
+                while self._iteration < self.config.max_iterations:
+                    self._iteration += 1
+
+                    if self._check_shutdown():
+                        break
+
+                    result = await self._process_turn()
+
+                    if result.should_exit:
+                        return
+
+                    if self._check_shutdown():
+                        break
+
+                    next_prompt = await self._get_next_prompt(result.was_interrupted)
+                    if next_prompt:
+                        await self._send_message(next_prompt)
+
+                # Check if we hit max iterations
+                if self._iteration >= self.config.max_iterations:
+                    self.on_max_iterations()
+
+            finally:
+                self._client = None
+
+    def _check_shutdown(self) -> bool:
+        """Check if shutdown was requested and handle it.
+
+        Returns:
+            True if shutdown was requested and handled.
+        """
+        if self._shutdown_state.get("shutdown_requested"):
+            self.on_shutdown(graceful=True)
+            return True
+        return False
+
+    async def _send_message(self, prompt: str) -> None:
+        """Send a message to the agent.
+
+        Disables input while sending, then re-enables after.
+
+        Args:
+            prompt: The message to send.
+        """
+        assert self._interactive is not None
+        assert self._client is not None
+
+        self._interactive.disable("Sending message...")
+        self._interactive.status = "working"
+
+        try:
+            await self._client.query(prompt)
+        finally:
+            self._interactive.enable()
+
+    async def _process_turn(self) -> TurnResult:
+        """Process one turn of messages from the agent.
+
+        Returns:
+            TurnResult indicating whether to exit or if interrupted.
+        """
+        assert self._interactive is not None
+        assert self._client is not None
+
+        self._last_assistant_text = ""
+        self._shutdown_state["query_running"] = True
+        self._is_turn_running = True
+        self._interactive.status = "thinking"
+
+        result = TurnResult()
+
+        try:
+            async for message in self._client.receive_response():
+                self._printer.print_message(message)
+
+                if isinstance(message, AssistantMessage):
+                    text = extract_assistant_text(message)
+                    self._last_assistant_text = text
+                    self.on_assistant_message(message, text)
+                    self._interactive.status = "working"
+
+                if isinstance(message, ResultMessage):
+                    self._save_session(
+                        session_id=message.session_id,
+                        num_turns=message.num_turns,
+                        cost_usd=message.total_cost_usd,
+                    )
+                    self.on_result(message)
+
+                    # Check if this was interrupted (user input is pending)
+                    if self._pending_input is not None:
+                        result.was_interrupted = True
+                    elif self.is_complete(message):
+                        self.on_complete()
+                        result.should_exit = True
+
+        except Exception:
+            if self._shutdown_state.get("shutdown_requested"):
+                self.on_shutdown(graceful=True)
+                result.should_exit = True
+            elif self._pending_input is not None:
+                # Interrupted by user input
+                result.was_interrupted = True
+            else:
+                raise
+        finally:
+            self._shutdown_state["query_running"] = False
+            self._is_turn_running = False
+
+        return result
+
+    async def _get_next_prompt(self, was_interrupted: bool) -> str | None:
+        """Determine the next prompt to send to the agent.
+
+        Args:
+            was_interrupted: Whether the previous turn was interrupted.
+
+        Returns:
+            The next prompt to send, or None if the loop should exit.
+        """
+        assert self._interactive is not None
+
+        # If we have pending user input (from interrupt or typed while idle)
+        if self._pending_input is not None:
+            prompt = self._pending_input
+            self._pending_input = None
+            return prompt
+
+        # Check if the agent is asking a question
+        if self.needs_user_input(self._last_assistant_text):
+            return await self._wait_for_user_input()
+
+        # Check if we should wait before continuing
+        idle_interval = self.get_idle_interval()
+        if idle_interval is not None and idle_interval > 0:
+            prompt = await self._wait_idle(idle_interval)
+            if prompt is not None:
+                return prompt
+
+        # Return continuation prompt
+        return self.get_continuation_prompt()
+
+    async def _wait_for_user_input(self) -> str | None:
+        """Wait for user input when the agent asks a question.
+
+        Returns:
+            The user's input, or None if shutdown requested.
+        """
+        assert self._interactive is not None
+
+        self._interactive.status = "waiting"
+        self._printer.console.print("[cyan]Waiting for your input...[/cyan]")
+
+        while True:
+            if self._shutdown_state.get("shutdown_requested"):
+                return None
+
+            # Check if input arrived
+            if self._pending_input is not None:
+                prompt = self._pending_input
+                self._pending_input = None
+                return prompt
+
+            await asyncio.sleep(0.1)
+
+    async def _wait_idle(self, interval: int) -> str | None:
+        """Wait for the idle interval, checking for user input.
+
+        Args:
+            interval: Seconds to wait.
+
+        Returns:
+            User input if received during wait, or None to continue.
+        """
+        assert self._interactive is not None
+
+        self._interactive.status = "idle"
+        self._printer.console.print(
+            f"[dim]Waiting {interval}s before continuing...[/dim]"
+        )
+
+        elapsed = 0.0
+        check_interval = 0.1
+
+        while elapsed < interval:
+            if self._shutdown_state.get("shutdown_requested"):
+                return None
+
+            # Check for user input during wait
+            if self._pending_input is not None:
+                prompt = self._pending_input
+                self._pending_input = None
+                return prompt
+
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+        return None  # No input received, caller should use continuation prompt

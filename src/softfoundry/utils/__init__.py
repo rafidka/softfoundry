@@ -1,12 +1,14 @@
 """Utility modules for softfoundry."""
 
 from softfoundry.utils.input import read_multiline_input
+from softfoundry.utils.interactive import InteractiveInput
 from softfoundry.utils.llm import extract_question, needs_user_input
 from softfoundry.utils.loop import (
     Agent,
     AgentConfig,
     GracefulExit,
     ImmediateExit,
+    TurnResult,
     extract_assistant_text,
 )
 from softfoundry.utils.output import MessagePrinter, Verbosity, create_printer
@@ -34,6 +36,8 @@ __all__ = [
     "AgentConfig",
     "GracefulExit",
     "ImmediateExit",
+    "InteractiveInput",
+    "TurnResult",
     "MessagePrinter",
     "SESSIONS_DIR",
     "SessionInfo",

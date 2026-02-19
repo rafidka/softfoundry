@@ -52,6 +52,7 @@ class ManagerAgent(Agent):
         self.github_repo = github_repo
         self.clone_path = clone_path
         self.num_programmers = num_programmers
+        self.project = project
 
         # Generate programmer names
         self.programmer_names = [
@@ -67,7 +68,7 @@ class ManagerAgent(Agent):
 
         # Build config and delegate to parent
         config = AgentConfig(
-            project=project,
+            namespace=project,
             agent_type=AGENT_TYPE,
             agent_name="manager",
             allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
@@ -93,7 +94,7 @@ uv run python -m softfoundry.agents.programmer \\
     --name "{name}" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
-    --project {self.config.project}
+    --project {self.project}
 ```"""
             for i, (name, _) in enumerate(self.programmer_names)
         )
@@ -103,7 +104,7 @@ uv run python -m softfoundry.agents.programmer \\
             for _, slug in self.programmer_names
         )
 
-        return f"""You are the Manager agent for the {self.config.project} project.
+        return f"""You are the Manager agent for the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Local clone: {self.clone_path}
@@ -124,7 +125,7 @@ CRITICAL: You MUST update your status file frequently using Bash:
 cat > {self._status_path} << 'EOF'
 {{
   "agent_type": "manager",
-  "project": "{self.config.project}",
+  "project": "{self.project}",
   "status": "working",
   "details": "Description of what you're doing",
   "last_update": "$(date -Iseconds)",
@@ -178,7 +179,7 @@ After setup is complete, tell the user to run these commands in separate termina
 uv run python -m softfoundry.agents.reviewer \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
-    --project {self.config.project}
+    --project {self.project}
 ```
 
 Then ask the user to type "ready" when they have started all the agents.
@@ -189,7 +190,7 @@ Once agents are running:
 
 1. Check agent status files:
    ```bash
-   cat ~/.softfoundry/agents/{self.config.project}/*.status 2>/dev/null || echo "No status files yet"
+   cat ~/.softfoundry/agents/{self.project}/*.status 2>/dev/null || echo "No status files yet"
    ```
 
 2. Check GitHub for progress:
@@ -215,7 +216,7 @@ Remember: Let Claude handle Git and GitHub operations directly using `gh` and `g
     def get_initial_prompt(self) -> str:
         """Build the first prompt, including crash-recovery context."""
         resume_context = self._get_resume_context()
-        return f"""Start managing the {self.config.project} project.
+        return f"""Start managing the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}

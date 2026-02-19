@@ -49,6 +49,7 @@ class ReviewerAgent(Agent):
         # Store agent-specific state
         self.github_repo = github_repo
         self.clone_path = clone_path
+        self.project = project
 
         # Determine working directory
         cwd = str(Path(clone_path).resolve()) if Path(clone_path).exists() else None
@@ -56,7 +57,7 @@ class ReviewerAgent(Agent):
         # Build config and delegate to parent
         # Reviewer doesn't need Edit/Write since it only reviews
         config = AgentConfig(
-            project=project,
+            namespace=project,
             agent_type=AGENT_TYPE,
             agent_name="reviewer",
             allowed_tools=["Read", "Glob", "Bash", "Grep"],
@@ -75,7 +76,7 @@ class ReviewerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the reviewer agent."""
-        return f"""You are the code reviewer for the {self.config.project} project.
+        return f"""You are the code reviewer for the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
@@ -89,7 +90,7 @@ CRITICAL: You MUST update your status file frequently using Bash:
 cat > {self._status_path} << 'EOF'
 {{
   "agent_type": "reviewer",
-  "project": "{self.config.project}",
+  "project": "{self.project}",
   "status": "working",
   "details": "Description of what you're doing",
   "current_pr": 5,
@@ -198,7 +199,7 @@ Then the project is complete. Update status to "exited:success" and exit.
     def get_initial_prompt(self) -> str:
         """Build the first prompt, including crash-recovery context."""
         resume_context = self._get_resume_context()
-        return f"""Start reviewing PRs for the {self.config.project} project.
+        return f"""Start reviewing PRs for the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
