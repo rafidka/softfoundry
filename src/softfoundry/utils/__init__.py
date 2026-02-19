@@ -6,8 +6,6 @@ from softfoundry.utils.llm import extract_question, needs_user_input
 from softfoundry.utils.loop import (
     Agent,
     AgentConfig,
-    GracefulExit,
-    ImmediateExit,
     TurnResult,
     extract_assistant_text,
 )
@@ -34,8 +32,6 @@ from softfoundry.utils.status import (
 __all__ = [
     "Agent",
     "AgentConfig",
-    "GracefulExit",
-    "ImmediateExit",
     "InteractiveInput",
     "TurnResult",
     "MessagePrinter",

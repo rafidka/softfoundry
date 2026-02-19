@@ -1,7 +1,6 @@
 """Agent loop framework for building interactive agentic applications.
 
 This module provides the `Agent` abstract base class that handles:
-- Signal handling (Ctrl+C graceful/immediate shutdown)
 - Session management (resume, new, interactive prompt)
 - Status file lifecycle (starting, exited:*)
 - The main agent loop with user interaction detection
@@ -10,7 +9,6 @@ Subclasses implement agent-specific logic via abstract methods.
 """
 
 import asyncio
-import signal
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -30,18 +28,6 @@ from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.sessions import SessionManager, format_session_info
 from softfoundry.utils.status import get_status_path, read_status, update_status
-
-
-class GracefulExit(Exception):
-    """Raised when user requests graceful shutdown (first Ctrl+C)."""
-
-    pass
-
-
-class ImmediateExit(Exception):
-    """Raised when user requests immediate shutdown (second Ctrl+C)."""
-
-    pass
 
 
 @dataclass
@@ -119,7 +105,6 @@ class Agent(ABC):
     """Abstract base class for building interactive agentic loops.
 
     This class handles the common infrastructure for running an agent:
-    - Signal handling (Ctrl+C graceful/immediate shutdown)
     - Session management (resume, new, interactive prompt)
     - Status file lifecycle (starting, exited:*)
     - The main agent loop with user interaction detection
@@ -145,7 +130,7 @@ class Agent(ABC):
             def get_continuation_prompt(self) -> str:
                 return "Continue working."
 
-        agent = MyAgent(AgentConfig(project="myproject", agent_type="worker"))
+        agent = MyAgent(AgentConfig(namespace="myproject", agent_type="worker"))
         await agent.run()
         ```
     """
@@ -174,7 +159,6 @@ class Agent(ABC):
 
         # Internal state
         self._iteration = 0
-        self._shutdown_state: dict[str, bool] = {}
         self._last_assistant_text = ""
 
         # Interactive input and SDK client (set up later in run())
@@ -284,29 +268,6 @@ class Agent(ABC):
             Status data as a dictionary, or None if file doesn't exist.
         """
         return read_status(self._status_path)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SIGNAL HANDLING
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _setup_signal_handlers(self) -> None:
-        """Set up signal handlers for graceful shutdown."""
-        self._shutdown_state = {"shutdown_requested": False, "query_running": False}
-
-        def handler(signum: int, frame: object) -> None:
-            if self._shutdown_state["shutdown_requested"]:
-                print("\nImmediate shutdown requested.")
-                raise ImmediateExit()
-            else:
-                self._shutdown_state["shutdown_requested"] = True
-                print("\nShutdown requested.")
-                if self._shutdown_state["query_running"]:
-                    print("Waiting for current query to complete...")
-                    print("Press Ctrl+C again to exit immediately.")
-                else:
-                    raise GracefulExit()
-
-        signal.signal(signal.SIGINT, handler)
 
     # ─────────────────────────────────────────────────────────────────────────
     # ABSTRACT METHODS - Must implement
@@ -422,22 +383,12 @@ class Agent(ABC):
     # LIFECYCLE HOOKS - Default implementations, override if needed
     # ─────────────────────────────────────────────────────────────────────────
 
-    def on_shutdown(self, graceful: bool) -> None:
+    def on_shutdown(self) -> None:
         """Called when the agent is shutting down via Ctrl+C.
 
-        Default implementation updates the status file. For immediate shutdown
-        (second Ctrl+C), prints a message.
-
-        Args:
-            graceful: True if this is a graceful shutdown (first Ctrl+C),
-                False if immediate (second Ctrl+C).
+        Default implementation updates the status file.
         """
-        self.update_status(
-            "exited:terminated",
-            "User requested shutdown" if graceful else "Immediate exit",
-        )
-        if not graceful:
-            self._printer.console.print("[red]Immediate exit.[/red]")
+        self.update_status("exited:terminated", "User interrupted")
 
     def on_error(self, error: Exception) -> None:
         """Called when an unhandled exception occurs.
@@ -536,14 +487,15 @@ class Agent(ABC):
 
         This method:
         1. Verifies stdin is a TTY (required for interactive input)
-        2. Sets up signal handlers
-        3. Creates the Claude SDK client with interactive input
-        4. Sends the initial prompt
-        5. Loops until completion, shutdown, or max iterations
+        2. Creates the Claude SDK client with interactive input
+        3. Sends the initial prompt
+        4. Loops until completion or max iterations
 
         A persistent input prompt is shown at the bottom of the terminal.
         Users can type while the agent is working. If they submit input
         while the agent is busy, it interrupts and processes their input.
+
+        Press Ctrl+C to exit at any time.
 
         Raises:
             RuntimeError: If stdin is not a TTY.
@@ -555,8 +507,6 @@ class Agent(ABC):
                 "Interactive mode requires a TTY. "
                 "Please run this agent in an interactive terminal."
             )
-
-        self._setup_signal_handlers()
 
         # Build Claude SDK options
         options = ClaudeAgentOptions(
@@ -581,26 +531,34 @@ class Agent(ABC):
                 try:
                     await self._run_loop(options)
                 finally:
-                    # Cancel the input task
-                    if self._input_task and not self._input_task.done():
-                        self._input_task.cancel()
-                        try:
-                            await self._input_task
-                        except asyncio.CancelledError:
-                            pass
-                    self._interactive.stop()
+                    # Cancel the input task and suppress its exceptions
+                    self._cleanup_input_task()
 
-        except GracefulExit:
-            self.on_shutdown(graceful=True)
-        except ImmediateExit:
-            self.on_shutdown(graceful=False)
-            sys.exit(1)
+        except KeyboardInterrupt:
+            self._printer.console.print("\n[yellow]Interrupted. Exiting...[/yellow]")
+            self.on_shutdown()
+            sys.exit(0)
         except Exception as e:
-            if self._shutdown_state.get("shutdown_requested"):
-                self.on_shutdown(graceful=True)
-            else:
-                self.on_error(e)
-                raise
+            self.on_error(e)
+            raise
+
+    def _cleanup_input_task(self) -> None:
+        """Clean up the input task, suppressing expected exceptions."""
+        if self._input_task:
+            if not self._input_task.done():
+                self._input_task.cancel()
+            # Suppress exceptions from the input task (KeyboardInterrupt, CancelledError)
+            # to avoid "Task exception was never retrieved" warnings
+            try:
+                self._input_task.exception()
+            except (
+                KeyboardInterrupt,
+                asyncio.CancelledError,
+                asyncio.InvalidStateError,
+            ):
+                pass
+        if self._interactive:
+            self._interactive.stop()
 
     async def _run_loop(self, options: ClaudeAgentOptions) -> None:
         """Run the main agent loop.
@@ -620,16 +578,10 @@ class Agent(ABC):
                 while self._iteration < self.config.max_iterations:
                     self._iteration += 1
 
-                    if self._check_shutdown():
-                        break
-
                     result = await self._process_turn()
 
                     if result.should_exit:
                         return
-
-                    if self._check_shutdown():
-                        break
 
                     next_prompt = await self._get_next_prompt(result.was_interrupted)
                     if next_prompt:
@@ -641,17 +593,6 @@ class Agent(ABC):
 
             finally:
                 self._client = None
-
-    def _check_shutdown(self) -> bool:
-        """Check if shutdown was requested and handle it.
-
-        Returns:
-            True if shutdown was requested and handled.
-        """
-        if self._shutdown_state.get("shutdown_requested"):
-            self.on_shutdown(graceful=True)
-            return True
-        return False
 
     async def _send_message(self, prompt: str) -> None:
         """Send a message to the agent.
@@ -682,7 +623,6 @@ class Agent(ABC):
         assert self._client is not None
 
         self._last_assistant_text = ""
-        self._shutdown_state["query_running"] = True
         self._is_turn_running = True
         self._interactive.status = "thinking"
 
@@ -714,16 +654,12 @@ class Agent(ABC):
                         result.should_exit = True
 
         except Exception:
-            if self._shutdown_state.get("shutdown_requested"):
-                self.on_shutdown(graceful=True)
-                result.should_exit = True
-            elif self._pending_input is not None:
+            if self._pending_input is not None:
                 # Interrupted by user input
                 result.was_interrupted = True
             else:
                 raise
         finally:
-            self._shutdown_state["query_running"] = False
             self._is_turn_running = False
 
         return result
@@ -763,7 +699,7 @@ class Agent(ABC):
         """Wait for user input when the agent asks a question.
 
         Returns:
-            The user's input, or None if shutdown requested.
+            The user's input, or None if interrupted.
         """
         assert self._interactive is not None
 
@@ -771,9 +707,6 @@ class Agent(ABC):
         self._printer.console.print("[cyan]Waiting for your input...[/cyan]")
 
         while True:
-            if self._shutdown_state.get("shutdown_requested"):
-                return None
-
             # Check if input arrived
             if self._pending_input is not None:
                 prompt = self._pending_input
@@ -802,9 +735,6 @@ class Agent(ABC):
         check_interval = 0.1
 
         while elapsed < interval:
-            if self._shutdown_state.get("shutdown_requested"):
-                return None
-
             # Check for user input during wait
             if self._pending_input is not None:
                 prompt = self._pending_input

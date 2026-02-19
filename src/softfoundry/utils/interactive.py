@@ -153,14 +153,12 @@ class InteractiveInput:
             except EOFError:
                 # Ctrl+D pressed
                 break
-            except KeyboardInterrupt:
-                # Ctrl+C - let the signal handler deal with it
-                continue
             except asyncio.CancelledError:
                 break
-            except Exception:
-                # Don't crash on unexpected errors
-                continue
+            except KeyboardInterrupt:
+                # Ctrl+C - stop the input loop, let main handle exit
+                self._running = False
+                raise
 
     def stop(self) -> None:
         """Stop the input loop."""

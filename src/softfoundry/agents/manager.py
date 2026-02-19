@@ -374,17 +374,20 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    asyncio.run(
-        run_manager(
-            github_repo=args.github_repo,
-            clone_path=args.clone_path,
-            num_programmers=args.num_programmers,
-            verbosity=args.verbosity,
-            resume=args.resume,
-            new_session=args.new_session,
-            max_iterations=args.max_iterations,
+    try:
+        asyncio.run(
+            run_manager(
+                github_repo=args.github_repo,
+                clone_path=args.clone_path,
+                num_programmers=args.num_programmers,
+                verbosity=args.verbosity,
+                resume=args.resume,
+                new_session=args.new_session,
+                max_iterations=args.max_iterations,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        pass  # Clean exit, message already printed by agent
 
 
 if __name__ == "__main__":
