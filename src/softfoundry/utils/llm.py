@@ -6,8 +6,10 @@ directly (not via Claude Code) for simple classification tasks.
 
 import anthropic
 
+from softfoundry.utils.env import get_anthropic_api_key
+
 # Use a fast, cheap model for classification
-CLASSIFICATION_MODEL = "claude-3-5-haiku-latest"
+CLASSIFICATION_MODEL = "claude-haiku-4-5"
 
 
 def needs_user_input(text: str) -> bool:
@@ -31,7 +33,7 @@ def needs_user_input(text: str) -> bool:
     if len(text) > max_chars:
         text = "..." + text[-max_chars:]
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=get_anthropic_api_key())
 
     prompt = f"""Analyze the following text and determine if it ends with a question or request that requires the user to provide information, make a decision, or give input.
 
@@ -87,7 +89,7 @@ def extract_question(text: str) -> str | None:
     if len(text) > max_chars:
         text = "..." + text[-max_chars:]
 
-    client = anthropic.Anthropic()
+    client = anthropic.Anthropic(api_key=get_anthropic_api_key())
 
     prompt = f"""Extract the main question or request from the following text that requires user input.
 

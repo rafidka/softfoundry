@@ -725,6 +725,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "claude-agent-sdk" },
     { name = "prompt-toolkit" },
+    { name = "python-dotenv" },
     { name = "rich" },
 ]
 
@@ -733,6 +734,7 @@ requires-dist = [
     { name = "anthropic", specifier = ">=0.79.0" },
     { name = "claude-agent-sdk", specifier = ">=0.1.35" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "rich", specifier = ">=14.3.2" },
 ]
 

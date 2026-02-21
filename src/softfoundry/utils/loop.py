@@ -23,6 +23,7 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
+from softfoundry.utils.env import get_claude_code_token
 from softfoundry.utils.interactive import InteractiveInput
 from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
@@ -515,6 +516,7 @@ class Agent(ABC):
             resume=self._session_id,
             system_prompt=self.get_system_prompt(),
             cwd=self._get_cwd(),
+            env={"CLAUDE_CODE_OAUTH_TOKEN": get_claude_code_token()},
         )
 
         # Create interactive input with our callback
