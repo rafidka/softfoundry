@@ -75,7 +75,13 @@ class MessagePrinter:
         if isinstance(content, str):
             self.console.print(f"[bold blue]User:[/bold blue] {escape(content)}")
         elif isinstance(content, list):
-            self.console.print("[bold blue]User:[/bold blue]")
+            # Check if this message contains only tool results (no actual user text)
+            # Tool results are printed separately after ToolUseBlock, so skip "User:" label
+            has_non_tool_content = any(
+                not isinstance(block, ToolResultBlock) for block in content
+            )
+            if has_non_tool_content:
+                self.console.print("[bold blue]User:[/bold blue]")
             for block in content:
                 self._print_content_block(block)
 
@@ -220,28 +226,74 @@ class MessagePrinter:
             return
 
         is_error = block.is_error or False
-        status = "[red]Error[/red]" if is_error else "[green]Success[/green]"
+        content = block.content
+        content_str = self._format_tool_result_content(content) if content else ""
 
         if self.verbosity == Verbosity.MEDIUM:
-            self.console.print(f"  [dim]->[/dim] {status}")
-        else:  # VERBOSE
-            content = block.content
-            if content:
-                content_str = self._format_tool_result_content(content)
-                self.console.print(f"  [dim]->[/dim] {status}")
-                if content_str.strip():
-                    # Truncate very long results
-                    if len(content_str) > 1000:
-                        content_str = content_str[:1000] + "\n... (truncated)"
+            if is_error and content_str.strip():
+                # Always show error content at MEDIUM verbosity
+                error_text = content_str.strip()
+                # Get first line or truncate
+                first_line = error_text.split("\n")[0]
+                if len(first_line) > 100:
+                    first_line = first_line[:100] + "..."
+                self.console.print(
+                    f"  [dim]->[/dim] [red]Error:[/red] {escape(first_line)}"
+                )
+            else:
+                # Show success with brief summary
+                summary = self._get_result_summary(content_str)
+                if summary:
                     self.console.print(
-                        Panel(
-                            escape(content_str),
-                            border_style="green" if not is_error else "red",
-                            padding=(0, 1),
-                        )
+                        f"  [dim]->[/dim] [green]Success[/green] {summary}"
                     )
+                else:
+                    self.console.print("  [dim]->[/dim] [green]Success[/green]")
+        else:  # VERBOSE
+            status = "[red]Error[/red]" if is_error else "[green]Success[/green]"
+            if content_str.strip():
+                self.console.print(f"  [dim]->[/dim] {status}")
+                # Truncate very long results
+                if len(content_str) > 1000:
+                    content_str = content_str[:1000] + "\n... (truncated)"
+                self.console.print(
+                    Panel(
+                        escape(content_str),
+                        border_style="green" if not is_error else "red",
+                        padding=(0, 1),
+                    )
+                )
             else:
                 self.console.print(f"  [dim]->[/dim] {status}")
+
+    def _get_result_summary(self, content: str) -> str:
+        """Generate a brief summary of successful tool result content.
+
+        Args:
+            content: The tool result content string.
+
+        Returns:
+            A brief summary string, or empty string if no summary available.
+        """
+        if not content or not content.strip():
+            return ""
+
+        lines = content.strip().split("\n")
+        num_lines = len(lines)
+        num_bytes = len(content.encode("utf-8"))
+
+        # Format size
+        if num_bytes >= 1024:
+            size_str = f"{num_bytes / 1024:.1f} KB"
+        else:
+            size_str = f"{num_bytes} bytes"
+
+        if num_lines > 1:
+            return f"[dim]({size_str}, {num_lines} lines)[/dim]"
+        elif num_bytes > 50:
+            return f"[dim]({size_str})[/dim]"
+        else:
+            return ""
 
     def _format_tool_result_content(self, content: str | list[dict[str, Any]]) -> str:
         """Format tool result content to a string."""
@@ -313,11 +365,8 @@ class MessagePrinter:
         if self.verbosity == Verbosity.VERBOSE and message.usage:
             self.console.print(f"[dim]Usage: {self._format_json(message.usage)}[/dim]")
 
-        if message.result and self.verbosity != Verbosity.MINIMAL:
-            result_text = message.result
-            if len(result_text) > 500 and self.verbosity == Verbosity.MEDIUM:
-                result_text = result_text[:500] + "..."
-            self.console.print(f"[dim]Result: {escape(result_text)}[/dim]")
+        # Note: We don't print message.result here because it duplicates
+        # the content already shown in AssistantMessage text blocks.
 
     def _format_json(self, data: dict[str, Any]) -> str:
         """Format a dictionary as indented JSON string."""
