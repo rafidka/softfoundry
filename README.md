@@ -23,7 +23,8 @@ softfoundry employs multiple AI agents (Manager, Programmer, Reviewer) that coll
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 - [GitHub CLI](https://cli.github.com/) (`gh`) - authenticated with repo access
-- Claude API access (via `claude-agent-sdk`)
+- Anthropic API key (for question detection)
+- Claude Code OAuth token (for the agent SDK)
 
 ## Installation
 
@@ -34,6 +35,12 @@ cd softfoundry
 
 # Install dependencies
 uv sync
+
+# Copy environment template and configure
+cp .env.example .env
+# Edit .env and add your API keys:
+# - SOFTFOUNDRY_ANTHROPIC_API_KEY: Get from https://console.anthropic.com/settings/keys
+# - SOFTFOUNDRY_CLAUDE_CODE_OAUTH_TOKEN: Generate with `claude --setup-token`
 
 # Ensure gh is authenticated
 gh auth status
@@ -168,17 +175,20 @@ softfoundry/
 │   ├── agents/           # Manager, Programmer, Reviewer agents
 │   ├── cli/              # CLI commands (clear)
 │   └── utils/            # Shared utilities
+│       ├── env.py        # Environment variable loading (.env)
 │       ├── input.py      # Multi-line input handling
-│       ├── llm.py        # Question detection using Claude
+│       ├── interactive.py # TUI input with prompt_toolkit
+│       ├── llm.py        # Question detection using Claude Haiku
+│       ├── loop.py       # Agent loop framework (base class)
 │       ├── output.py     # Rich console formatting
 │       ├── sessions.py   # Session persistence
 │       └── status.py     # Agent status management
 ├── castings/             # Generated project workspaces
 │   ├── {project}/        # Main git clone
 │   └── {project}-{name}/ # Programmer worktrees
+├── .env.example          # Environment template
 ├── ARCHITECTURE.md       # Detailed system architecture
 ├── claude-docs/          # Claude Agent SDK reference
-│   └── IMPLEMENTATION_PLAN.md  # Original design document
 └── pyproject.toml
 
 ~/.softfoundry/           # User-level data
@@ -242,6 +252,28 @@ Agents write status files to `~/.softfoundry/agents/{project}/` that include:
 - Process ID
 
 The manager can detect stale agents (no update in 5+ minutes) and alert the user.
+
+## Environment Configuration
+
+softfoundry uses a `.env` file for API credentials with `SOFTFOUNDRY_*` prefixed variable names to avoid conflicts with system environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `SOFTFOUNDRY_ANTHROPIC_API_KEY` | Direct API calls for question detection |
+| `SOFTFOUNDRY_CLAUDE_CODE_OAUTH_TOKEN` | Claude Code SDK authentication |
+
+The system will:
+1. Warn about and ignore any system `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
+2. Load credentials from `.env` using the prefixed names
+3. Validate all required variables before starting
+
+## Interactive Input
+
+Agents feature an interactive terminal UI using `prompt_toolkit`:
+- Persistent input prompt at the bottom of the terminal
+- Status indicator showing agent state (working, waiting, idle)
+- Type while the agent is working to interrupt and send input
+- Press Ctrl+C to exit gracefully
 
 ## Development
 

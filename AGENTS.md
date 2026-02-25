@@ -9,7 +9,7 @@ This document provides instructions for AI coding agents working in this reposit
 - **Package Manager**: uv (https://docs.astral.sh/uv/)
 - **Python Version**: 3.12+
 - **Source Layout**: `src/softfoundry/`
-- **Dependencies**: `claude-agent-sdk`, `anthropic`, `rich`
+- **Dependencies**: `claude-agent-sdk`, `anthropic`, `rich`, `prompt-toolkit`, `python-dotenv`
 
 ## Architecture
 
@@ -36,17 +36,20 @@ softfoundry/
 │   │   └── clear.py           # Clear sessions and status files
 │   └── utils/                 # Shared utilities
 │       ├── __init__.py
+│       ├── env.py             # Environment variable loading (.env)
 │       ├── input.py           # Multi-line input handling
+│       ├── interactive.py     # TUI input with prompt_toolkit
 │       ├── llm.py             # LLM utilities (question detection)
+│       ├── loop.py            # Agent loop framework (base class)
 │       ├── output.py          # Rich message formatting
 │       ├── sessions.py        # Session persistence
 │       └── status.py          # Agent status file management
 ├── castings/                  # Generated project workspaces
 │   ├── {project}/             # Main git clone
 │   └── {project}-{name}/      # Programmer worktrees
+├── .env.example               # Environment template
 ├── ARCHITECTURE.md            # System architecture details
 ├── claude-docs/               # Claude Agent SDK reference
-│   ├── ClaudeAgentSDK.md      # SDK reference
 │   └── IMPLEMENTATION_PLAN.md # Implementation design
 ├── pyproject.toml             # Project configuration
 └── uv.lock                    # Dependency lock file
@@ -185,58 +188,88 @@ def process_task(name: str, timeout: int = 30) -> dict[str, Any]:
 
 ### Agent Implementation
 
-Agents use `ClaudeSDKClient` from `claude_agent_sdk` for continuous conversations:
+Agents extend the `Agent` abstract base class from `loop.py`, which handles:
+- Session management (resume, new, interactive prompt)
+- Status file lifecycle
+- Interactive input with `prompt_toolkit`
+- The main agent loop with user interaction detection
 
 ```python
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
+from claude_agent_sdk import ResultMessage
 
-async def run_agent(prompt: str) -> None:
-    options = ClaudeAgentOptions(
-        allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
-        permission_mode="acceptEdits",
-        system_prompt="Your system prompt here",
-        cwd="/path/to/workspace",
-    )
-    
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        
-        async for message in client.receive_response():
-            # Process messages
-            if isinstance(message, ResultMessage):
-                # Handle completion
-                pass
+from softfoundry.utils.env import initialize_environment
+from softfoundry.utils.loop import Agent, AgentConfig
+
+
+class MyAgent(Agent):
+    """Example agent implementation."""
+
+    def __init__(self, project: str, **kwargs):
+        config = AgentConfig(
+            namespace=project,
+            agent_type="myagent",
+            agent_name="default",
+            allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+            permission_mode="acceptEdits",
+            **kwargs,
+        )
+        super().__init__(config)
+
+    def get_system_prompt(self) -> str:
+        """Return the system prompt defining agent behavior."""
+        return "You are a helpful agent..."
+
+    def get_initial_prompt(self) -> str:
+        """Return the first prompt to start the agent's work."""
+        return "Start working on the task."
+
+    def is_complete(self, result: ResultMessage) -> bool:
+        """Check if the agent's work is done."""
+        return result.result is not None and "complete" in result.result.lower()
+
+    def get_continuation_prompt(self) -> str:
+        """Return the prompt when agent should keep working."""
+        return "Continue working."
+
+
+def main() -> None:
+    initialize_environment()
+    agent = MyAgent(project="myproject")
+    asyncio.run(agent.run())
 ```
 
-### Signal Handling Pattern
+### Optional Agent Hooks
 
-All agents implement graceful shutdown with signal handlers:
+Agents can override these methods for customization:
 
 ```python
-class GracefulExit(Exception):
-    """Raised when user requests graceful shutdown."""
+def get_idle_interval(self) -> int | None:
+    """Seconds to wait before continuation (for polling)."""
+    return 30  # or None for immediate continuation
+
+def needs_user_input(self, text: str) -> bool:
+    """Override to customize user input detection."""
+    return needs_user_input(text)  # Default uses LLM classifier
+
+def on_assistant_message(self, message: AssistantMessage, text: str) -> None:
+    """Hook called when assistant sends a message."""
     pass
 
-class ImmediateExit(Exception):
-    """Raised when user requests immediate shutdown."""
+def on_result(self, result: ResultMessage) -> None:
+    """Hook called when a result is received."""
     pass
 
-def setup_signal_handlers() -> dict[str, bool]:
-    """Set up signal handlers for graceful shutdown."""
-    state = {"shutdown_requested": False, "query_running": False}
+def on_shutdown(self) -> None:
+    """Called when agent is shutting down via Ctrl+C."""
+    self.update_status("exited:terminated", "User interrupted")
 
-    def handler(signum: int, frame: object) -> None:
-        if state["shutdown_requested"]:
-            raise ImmediateExit()
-        else:
-            state["shutdown_requested"] = True
-            if state["query_running"]:
-                print("\nShutdown requested. Waiting for current query...")
-            else:
-                raise GracefulExit()
+def on_error(self, error: Exception) -> None:
+    """Called when an unhandled exception occurs."""
+    self.update_status("exited:error", f"Error: {error}")
 
-    signal.signal(signal.SIGINT, handler)
-    return state
+def on_complete(self) -> None:
+    """Called when is_complete() returns True."""
+    self.update_status("exited:success", "Completed successfully")
 ```
 
 ### Running Agents
@@ -340,6 +373,22 @@ Agents maintain status files at `~/.softfoundry/agents/{project}/`:
 
 ### Utility Modules
 
+**`utils/env.py`** - Environment variable loading:
+- `initialize_environment()` - Load .env and validate required variables
+- `get_anthropic_api_key()` - Get API key for direct Anthropic calls
+- `get_claude_code_token()` - Get OAuth token for Claude SDK
+
+**`utils/loop.py`** - Agent loop framework:
+- `Agent` - Abstract base class for building agents
+- `AgentConfig` - Configuration dataclass for agents
+- `TurnResult` - Result of processing one agent turn
+- `extract_assistant_text()` - Extract text from AssistantMessage
+
+**`utils/interactive.py`** - TUI input handling:
+- `InteractiveInput` - Async input handler with prompt_toolkit
+- Status indicator in prompt (idle, waiting, working, thinking)
+- Input while agent is working interrupts the current turn
+
 **`utils/status.py`** - Agent status file management:
 - `get_status_path()` - Get path to status file
 - `update_status()` - Update status with atomic writes
@@ -357,7 +406,7 @@ Agents maintain status files at `~/.softfoundry/agents/{project}/`:
 - `Verbosity` - Enum (minimal, medium, verbose)
 - `create_printer()` - Factory function
 
-**`utils/llm.py`** - LLM utilities:
+**`utils/llm.py`** - LLM utilities (uses `claude-haiku-4-5`):
 - `needs_user_input()` - Detect if agent is asking a question
 - `extract_question()` - Extract the question from text
 
