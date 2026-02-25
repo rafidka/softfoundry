@@ -8,6 +8,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "manager"
@@ -339,6 +340,8 @@ async def run_manager(
 
 def main() -> None:
     """Entry point for the manager agent CLI."""
+    initialize_environment()
+
     parser = argparse.ArgumentParser(
         description="Run the manager agent for project coordination."
     )

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.loop import Agent, AgentConfig
 from softfoundry.utils.status import sanitize_name
 
@@ -353,6 +354,8 @@ async def run_programmer(
 
 def main() -> None:
     """Entry point for the programmer agent CLI."""
+    initialize_environment()
+
     parser = argparse.ArgumentParser(
         description="Run a programmer agent for task implementation."
     )

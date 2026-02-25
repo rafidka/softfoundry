@@ -516,7 +516,10 @@ class Agent(ABC):
             resume=self._session_id,
             system_prompt=self.get_system_prompt(),
             cwd=self._get_cwd(),
-            env={"CLAUDE_CODE_OAUTH_TOKEN": get_claude_code_token()},
+            env={
+                "ANTHROPIC_API_KEY": "",  # Empty ANTHROPIC_API_KEY to prevent SDK from using API key
+                "CLAUDE_CODE_OAUTH_TOKEN": get_claude_code_token(),
+            },
         )
 
         # Create interactive input with our callback

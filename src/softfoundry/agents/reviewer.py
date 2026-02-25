@@ -7,6 +7,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "reviewer"
@@ -298,6 +299,8 @@ async def run_reviewer(
 
 def main() -> None:
     """Entry point for the reviewer agent CLI."""
+    initialize_environment()
+
     parser = argparse.ArgumentParser(
         description="Run the reviewer agent for PR review and merging."
     )

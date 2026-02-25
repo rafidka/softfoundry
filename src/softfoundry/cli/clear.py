@@ -2,6 +2,7 @@
 
 import argparse
 
+from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.sessions import SESSIONS_DIR
 from softfoundry.utils.status import STATUS_DIR
 
@@ -111,6 +112,8 @@ def clear_project(project: str, dry_run: bool = False) -> None:
 
 def main() -> None:
     """Entry point for the clear command."""
+    initialize_environment()
+
     parser = argparse.ArgumentParser(
         description="Clear softfoundry sessions and status files."
     )
