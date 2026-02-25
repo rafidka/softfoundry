@@ -1,14 +1,11 @@
 """Manager agent that coordinates project setup and guides users to start other agents."""
 
-import argparse
-import asyncio
 import os
 import sys
 from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
-from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "manager"
@@ -336,73 +333,3 @@ async def run_manager(
         max_iterations=max_iterations,
     )
     await agent.run()
-
-
-def main() -> None:
-    """Entry point for the manager agent CLI."""
-    initialize_environment()
-
-    parser = argparse.ArgumentParser(
-        description="Run the manager agent for project coordination."
-    )
-    parser.add_argument(
-        "--github-repo",
-        type=str,
-        help="GitHub repository in OWNER/REPO format (prompted if not provided)",
-    )
-    parser.add_argument(
-        "--clone-path",
-        type=str,
-        help="Local path to clone the repo (default: castings/{project})",
-    )
-    parser.add_argument(
-        "--num-programmers",
-        type=int,
-        help="Number of programmer agents (prompted if not provided)",
-    )
-    parser.add_argument(
-        "--verbosity",
-        type=str,
-        choices=["minimal", "medium", "verbose"],
-        default="medium",
-        help="Output verbosity level (default: medium)",
-    )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=DEFAULT_MAX_ITERATIONS,
-        help=f"Maximum loop iterations (default: {DEFAULT_MAX_ITERATIONS})",
-    )
-
-    session_group = parser.add_mutually_exclusive_group()
-    session_group.add_argument(
-        "--resume",
-        action="store_true",
-        help="Automatically resume existing session (fails if no session exists)",
-    )
-    session_group.add_argument(
-        "--new-session",
-        action="store_true",
-        help="Start a new session (deletes existing session if present)",
-    )
-
-    args = parser.parse_args()
-
-    try:
-        asyncio.run(
-            run_manager(
-                github_repo=args.github_repo,
-                clone_path=args.clone_path,
-                num_programmers=args.num_programmers,
-                verbosity=args.verbosity,
-                resume=args.resume,
-                new_session=args.new_session,
-                max_iterations=args.max_iterations,
-            )
-        )
-    except KeyboardInterrupt:
-        pass  # Clean exit, message already printed by agent
-
-
-if __name__ == "__main__":
-    main()

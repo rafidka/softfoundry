@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from softfoundry!")
+"""softfoundry - Multi-agent system for generating software projects."""

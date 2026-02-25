@@ -13,11 +13,12 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "python-dotenv>=1.0.0",
     "rich>=14.3.2",
+    "typer>=0.24.1",
 ]
 
 [project.scripts]
-softfoundry = "softfoundry:main"
-softfoundry-clear = "softfoundry.cli.clear:main"
+softfoundry = "softfoundry.cli:app"
+sf = "softfoundry.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.10.1,<0.11.0"]

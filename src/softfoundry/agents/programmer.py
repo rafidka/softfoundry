@@ -1,13 +1,10 @@
 """Programmer agent that works on GitHub issues and creates PRs."""
 
-import argparse
-import asyncio
 import os
 from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
-from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.loop import Agent, AgentConfig
 from softfoundry.utils.status import sanitize_name
 
@@ -350,83 +347,3 @@ async def run_programmer(
         max_iterations=max_iterations,
     )
     await agent.run()
-
-
-def main() -> None:
-    """Entry point for the programmer agent CLI."""
-    initialize_environment()
-
-    parser = argparse.ArgumentParser(
-        description="Run a programmer agent for task implementation."
-    )
-    parser.add_argument(
-        "--name",
-        type=str,
-        required=True,
-        help="Name of the programmer (e.g., 'Alice Chen')",
-    )
-    parser.add_argument(
-        "--github-repo",
-        type=str,
-        required=True,
-        help="GitHub repository in OWNER/REPO format",
-    )
-    parser.add_argument(
-        "--clone-path",
-        type=str,
-        required=True,
-        help="Path to the main git clone",
-    )
-    parser.add_argument(
-        "--project",
-        type=str,
-        required=True,
-        help="Project name",
-    )
-    parser.add_argument(
-        "--verbosity",
-        type=str,
-        choices=["minimal", "medium", "verbose"],
-        default="medium",
-        help="Output verbosity level (default: medium)",
-    )
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=DEFAULT_MAX_ITERATIONS,
-        help=f"Maximum loop iterations (default: {DEFAULT_MAX_ITERATIONS})",
-    )
-
-    session_group = parser.add_mutually_exclusive_group()
-    session_group.add_argument(
-        "--resume",
-        action="store_true",
-        help="Automatically resume existing session (fails if no session exists)",
-    )
-    session_group.add_argument(
-        "--new-session",
-        action="store_true",
-        help="Start a new session (deletes existing session if present)",
-    )
-
-    args = parser.parse_args()
-
-    try:
-        asyncio.run(
-            run_programmer(
-                name=args.name,
-                github_repo=args.github_repo,
-                clone_path=args.clone_path,
-                project=args.project,
-                verbosity=args.verbosity,
-                resume=args.resume,
-                new_session=args.new_session,
-                max_iterations=args.max_iterations,
-            )
-        )
-    except KeyboardInterrupt:
-        pass  # Clean exit, message already printed by agent
-
-
-if __name__ == "__main__":
-    main()

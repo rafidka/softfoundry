@@ -1,13 +1,15 @@
-"""CLI command to clear sessions and status files."""
+"""Clear command for softfoundry CLI."""
 
-import argparse
+from typing import Annotated
+
+import typer
 
 from softfoundry.utils.env import initialize_environment
 from softfoundry.utils.sessions import SESSIONS_DIR
 from softfoundry.utils.status import STATUS_DIR
 
 
-def clear_all(dry_run: bool = False) -> None:
+def _clear_all(dry_run: bool = False) -> None:
     """Clear all sessions and status files.
 
     Args:
@@ -62,7 +64,7 @@ def clear_all(dry_run: bool = False) -> None:
         print("\nAll sessions and status files cleared!")
 
 
-def clear_project(project: str, dry_run: bool = False) -> None:
+def _clear_project(project: str, dry_run: bool = False) -> None:
     """Clear sessions and status files for a specific project.
 
     Args:
@@ -110,31 +112,27 @@ def clear_project(project: str, dry_run: bool = False) -> None:
         print(f"\nAll sessions and status files for '{project}' cleared!")
 
 
-def main() -> None:
-    """Entry point for the clear command."""
-    initialize_environment()
+def register_command(app: typer.Typer) -> tuple:
+    """Register the clear command with the Typer app."""
 
-    parser = argparse.ArgumentParser(
-        description="Clear softfoundry sessions and status files."
-    )
-    parser.add_argument(
-        "--project",
-        type=str,
-        help="Clear only files for a specific project (default: clear all)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be deleted without actually deleting",
-    )
+    @app.command(help="Clear softfoundry sessions and status files.")
+    def clear(
+        project: Annotated[
+            str | None,
+            typer.Option(help="Clear only files for a specific project (default: all)"),
+        ] = None,
+        dry_run: Annotated[
+            bool,
+            typer.Option(
+                "--dry-run", help="Show what would be deleted without deleting"
+            ),
+        ] = False,
+    ) -> None:
+        initialize_environment()
 
-    args = parser.parse_args()
+        if project:
+            _clear_project(project, dry_run=dry_run)
+        else:
+            _clear_all(dry_run=dry_run)
 
-    if args.project:
-        clear_project(args.project, dry_run=args.dry_run)
-    else:
-        clear_all(dry_run=args.dry_run)
-
-
-if __name__ == "__main__":
-    main()
+    return (clear,)
