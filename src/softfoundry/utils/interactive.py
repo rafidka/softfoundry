@@ -13,6 +13,8 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 
 
@@ -48,6 +50,7 @@ class InteractiveInput:
         self,
         on_input: Callable[[str], None],
         prompt: str = "> ",
+        multiline: bool = True,
     ):
         """Initialize the interactive input handler.
 
@@ -55,9 +58,13 @@ class InteractiveInput:
             on_input: Callback called when user submits input.
                 This is called synchronously from the input loop.
             prompt: The prompt string to display after the status.
+            multiline: Enable multi-line input mode. When True, users can
+                enter multiple lines before submitting. Enter submits,
+                Shift+Enter/Esc+Enter/Alt+Enter insert newlines.
         """
         self._on_input = on_input
         self._prompt = prompt
+        self._multiline = multiline
         self._session: PromptSession[str] | None = None
         self._running = False
         self._status = "idle"
@@ -94,7 +101,7 @@ class InteractiveInput:
         self._disabled_message = message
 
     def _get_prompt(self) -> FormattedText:
-        """Generate the prompt with status indicator."""
+        """Generate the prompt with status indicator and multiline hint."""
         status_styles = {
             "idle": "ansibrightblack",
             "waiting": "ansicyan",
@@ -102,11 +109,53 @@ class InteractiveInput:
             "thinking": "ansimagenta",
         }
         style = status_styles.get(self._status, "ansibrightblack")
-        return FormattedText([(style, f"[{self._status}] "), ("", self._prompt)])
+
+        parts: list[tuple[str, str]] = [
+            (style, f"[{self._status}] "),
+            ("", self._prompt),
+        ]
+
+        # Add multiline hint
+        if self._multiline:
+            parts.append(("ansibrightblack", "(Ctrl+J for newline) "))
+
+        return FormattedText(parts)
+
+    def _create_key_bindings(self) -> KeyBindings:
+        """Create custom key bindings for multiline input.
+
+        Returns:
+            KeyBindings configured based on multiline settings.
+        """
+        bindings = KeyBindings()
+
+        if not self._multiline:
+            # Single-line mode: default behavior (Enter submits)
+            return bindings
+
+        # Multiline mode: Enter submits, various combos insert newline
+        @bindings.add(Keys.Enter)
+        def _enter_submit(event: Any) -> None:
+            event.current_buffer.validate_and_handle()
+
+        # Escape then Enter (universal fallback)
+        @bindings.add(Keys.Escape, Keys.Enter)
+        def _escape_enter_newline(event: Any) -> None:
+            event.current_buffer.insert_text("\n")
+
+        # Ctrl+J (line feed) - traditional Unix newline shortcut
+        @bindings.add(Keys.ControlJ)
+        def _ctrl_j_newline(event: Any) -> None:
+            event.current_buffer.insert_text("\n")
+
+        return bindings
 
     async def __aenter__(self) -> "InteractiveInput":
         """Enter the async context, setting up stdout patching."""
-        self._session = PromptSession()
+        self._session = PromptSession(
+            multiline=self._multiline,
+            key_bindings=self._create_key_bindings(),
+        )
         self._patch_context = patch_stdout(raw=True)
         self._patch_context.__enter__()
         return self
