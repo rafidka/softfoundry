@@ -43,10 +43,6 @@ def register_command(app: typer.Typer) -> tuple:
                 help="Local path to clone the repo (default: castings/{project})"
             ),
         ] = None,
-        num_programmers: Annotated[
-            int | None,
-            typer.Option(help="Number of programmer agents (prompted if not provided)"),
-        ] = None,
         verbosity: Annotated[
             Verbosity,
             typer.Option(help="Output verbosity level"),
@@ -71,7 +67,6 @@ def register_command(app: typer.Typer) -> tuple:
                 run_manager(
                     github_repo=github_repo,
                     clone_path=clone_path,
-                    num_programmers=num_programmers,
                     verbosity=verbosity.value,
                     resume=resume,
                     new_session=new_session,

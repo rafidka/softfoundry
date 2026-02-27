@@ -29,8 +29,12 @@ class Verbosity(str, Enum):
 def register_command(app: typer.Typer) -> tuple:
     """Register the reviewer command with the Typer app."""
 
-    @app.command(help="Run the reviewer agent for PR review and merging.")
+    @app.command(help="Run a reviewer agent for PR review and merging.")
     def reviewer(
+        name: Annotated[
+            str,
+            typer.Option(help="Name of the reviewer (e.g., 'Rachel Review')"),
+        ],
         github_repo: Annotated[
             str,
             typer.Option(help="GitHub repository in OWNER/REPO format"),
@@ -65,6 +69,7 @@ def register_command(app: typer.Typer) -> tuple:
         try:
             asyncio.run(
                 run_reviewer(
+                    name=name,
                     github_repo=github_repo,
                     clone_path=clone_path,
                     project=project,

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.utils.github import LABEL_COLORS
 from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "manager"
@@ -19,15 +20,14 @@ class ManagerAgent(Agent):
     This agent:
     1. Sets up the project (clone repo, create PROJECT.md, create issues)
     2. Guides the user to start programmer and reviewer agents
-    3. Monitors project progress
-    4. Determines when the project is complete
+    3. Monitors project progress and releases stale tasks
+    4. Determines when the project is complete (all issues closed)
     """
 
     def __init__(
         self,
         github_repo: str,
         clone_path: str,
-        num_programmers: int,
         project: str,
         resume: bool = False,
         new_session: bool = False,
@@ -39,7 +39,6 @@ class ManagerAgent(Agent):
         Args:
             github_repo: GitHub repository in OWNER/REPO format.
             clone_path: Local path to clone the repo.
-            num_programmers: Number of programmer agents.
             project: Project name (derived from repo).
             resume: If True, automatically resume existing session.
             new_session: If True, force a new session.
@@ -49,17 +48,7 @@ class ManagerAgent(Agent):
         # Store agent-specific state
         self.github_repo = github_repo
         self.clone_path = clone_path
-        self.num_programmers = num_programmers
         self.project = project
-
-        # Generate programmer names
-        self.programmer_names = [
-            ("Alice Chen", "alice-chen"),
-            ("Bob Smith", "bob-smith"),
-            ("Carol Davis", "carol-davis"),
-            ("David Lee", "david-lee"),
-            ("Eve Wilson", "eve-wilson"),
-        ][:num_programmers]
 
         # Determine working directory
         cwd = str(Path(clone_path).resolve()) if Path(clone_path).exists() else None
@@ -85,35 +74,31 @@ class ManagerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the manager agent."""
-        programmer_commands = "\n\n".join(
-            f"""**Programmer {i + 1} ({name}):**
-```bash
-uv run python -m softfoundry.agents.programmer \\
-    --name "{name}" \\
-    --github-repo {self.github_repo} \\
-    --clone-path {self.clone_path} \\
-    --project {self.project}
-```"""
-            for i, (name, _) in enumerate(self.programmer_names)
-        )
-
-        assignee_labels = "\n".join(
-            f'   gh label create "assignee:{slug}" --color "0366d6" --repo {self.github_repo} --force'
-            for _, slug in self.programmer_names
-        )
-
         return f"""You are the Manager agent for the {self.project} project.
 
 GitHub repo: {self.github_repo}
 Local clone: {self.clone_path}
 Status file: {self._status_path}
-Number of programmers: {self.num_programmers}
 
 Your responsibilities:
 1. Project setup and task planning
-2. Guiding the user to start programmer/reviewer agents
-3. Monitoring project progress
-4. Determining when the project is complete
+2. Guiding the user to start programmer/reviewer agents (they self-assign tasks)
+3. Monitoring project progress and releasing stale tasks
+4. Determining when the project is complete (all issues closed)
+
+## Multi-Agent Context (IMPORTANT)
+
+This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL share the SAME GitHub account. This means:
+
+1. **All GitHub activity appears to come from the same user** - When you see issues, PRs, or comments, they may have been created by OTHER agents, not you.
+
+2. **Do NOT be confused by "your own" activity** - If you see a PR, comment, or issue that you don't remember creating, it was likely created by another agent (a Programmer or Reviewer).
+
+3. **Always identify yourself** - Since GitHub can't distinguish between agents, include your signature in all comments: **[Manager]:**
+
+4. **Coordinate via labels, not usernames** - Use `assignee:{{slug}}` and `reviewer:{{slug}}` labels to track who is working on what, since GitHub's native assignment would show the same user for everyone.
+
+5. **Trust the labels** - The labels are the source of truth for task assignment, not GitHub's author/assignee fields.
 
 ## Status File Updates
 
@@ -157,12 +142,12 @@ EOF
 
 4. Create GitHub labels:
    ```bash
-   gh label create "status:pending" --color "fbca04" --repo {self.github_repo} --force
-   gh label create "status:in-progress" --color "0e8a16" --repo {self.github_repo} --force
-   gh label create "status:in-review" --color "6f42c1" --repo {self.github_repo} --force
-   gh label create "priority:high" --color "d73a4a" --repo {self.github_repo} --force
-   gh label create "priority:medium" --color "fbca04" --repo {self.github_repo} --force
-   gh label create "priority:low" --color "0e8a16" --repo {self.github_repo} --force
+   gh label create "status:pending" --color "{LABEL_COLORS["status_pending"]}" --repo {self.github_repo} --force
+   gh label create "status:in-progress" --color "{LABEL_COLORS["status_in_progress"]}" --repo {self.github_repo} --force
+   gh label create "status:in-review" --color "{LABEL_COLORS["status_in_review"]}" --repo {self.github_repo} --force
+   gh label create "priority:high" --color "{LABEL_COLORS["priority_high"]}" --repo {self.github_repo} --force
+   gh label create "priority:medium" --color "{LABEL_COLORS["priority_medium"]}" --repo {self.github_repo} --force
+   gh label create "priority:low" --color "{LABEL_COLORS["priority_low"]}" --repo {self.github_repo} --force
    ```
 
 5. Create issues for each task based on the approved plan:
@@ -170,49 +155,119 @@ EOF
    gh issue create --repo {self.github_repo} --title "Task title" --body "Description" --label "status:pending,priority:medium"
    ```
 
-6. Create assignee labels for each programmer:
-   ```bash
-{assignee_labels}
-   ```
-
-7. Assign initial tasks to programmers by adding assignee labels to issues
+NOTE: Do NOT assign tasks to programmers. Programmer agents will self-assign tasks by claiming them.
 
 ## Phase 2: Instruct User to Start Agents
 
-After setup is complete, tell the user to run these commands in separate terminal tabs:
+After setup is complete, display clear instructions for starting agents.
 
-{programmer_commands}
+Tell the user they can start AS MANY programmer and reviewer agents as they want.
+Each programmer needs a unique name. Each reviewer needs a unique name.
 
-**Reviewer:**
+**Example Programmer Commands (user can run multiple with different names):**
 ```bash
-uv run python -m softfoundry.agents.reviewer \\
+sf programmer --name "Alice Chen" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
     --project {self.project}
 ```
 
-Then ask the user to type "ready" when they have started all the agents.
+```bash
+sf programmer --name "Bob Smith" \\
+    --github-repo {self.github_repo} \\
+    --clone-path {self.clone_path} \\
+    --project {self.project}
+```
 
-## Phase 3: Monitor
+**Example Reviewer Commands (user can run multiple with different names):**
+```bash
+sf reviewer --name "Rachel Review" \\
+    --github-repo {self.github_repo} \\
+    --clone-path {self.clone_path} \\
+    --project {self.project}
+```
 
-Once agents are running:
+Explain that:
+- Programmers will automatically find and claim unassigned tasks
+- Reviewers will automatically find and claim PRs to review
+- They can start as many agents as they want for parallelism
+- Each agent needs a unique name for tracking
 
-1. Check agent status files:
+Then ask the user to type "ready" when they have started the agents.
+
+## Phase 3: Monitor and Release Stale Tasks
+
+Once agents are running, periodically:
+
+### 1. Check for Stale Programmer Agents
+
+Read all programmer status files and check for stale agents (no update in 5+ minutes):
+
+```bash
+# List all programmer status files
+for f in ~/.softfoundry/agents/{self.project}/programmer-*.status; do
+  if [ -f "$f" ]; then
+    echo "=== $f ==="
+    cat "$f"
+    echo ""
+  fi
+done
+```
+
+For each status file, check the `last_update` timestamp. If more than 5 minutes old:
+1. The agent is stale/dead
+2. Check if it has a `current_issue` set
+3. If yes, release that task and explain why:
    ```bash
-   cat ~/.softfoundry/agents/{self.project}/*.status 2>/dev/null || echo "No status files yet"
+   # Remove the assignee label
+   gh issue edit ISSUE_NUMBER --repo {self.github_repo} --remove-label "assignee:SLUG"
+   
+   # Add explanatory comment
+   gh issue comment ISSUE_NUMBER --repo {self.github_repo} --body "**[Manager]:** Released this task - the assigned programmer (AGENT_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). This task is now available for other programmers to claim."
    ```
 
-2. Check GitHub for progress:
-   ```bash
-   gh issue list --repo {self.github_repo} --state open --json number,title,labels
-   gh pr list --repo {self.github_repo} --state open --json number,title,state
-   ```
+### 2. Check for Stale Reviewer Agents
 
-3. Report progress to the user
+Similar process for reviewer status files:
+```bash
+for f in ~/.softfoundry/agents/{self.project}/reviewer-*.status; do
+  if [ -f "$f" ]; then
+    echo "=== $f ==="
+    cat "$f"
+    echo ""
+  fi
+done
+```
 
-4. If all issues are closed and all PRs are merged, the project is complete!
-   - Update your status to "exited:success"
-   - Congratulate the user
+If a reviewer is stale and has a `current_pr`, release that PR and explain why:
+```bash
+# Remove the reviewer label
+gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:SLUG"
+
+# Add explanatory comment
+gh pr comment PR_NUMBER --repo {self.github_repo} --body "**[Manager]:** Released this PR - the assigned reviewer (REVIEWER_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). Another reviewer may now claim this PR."
+```
+
+### 3. Check GitHub Progress
+
+```bash
+gh issue list --repo {self.github_repo} --state open --json number,title,labels
+gh pr list --repo {self.github_repo} --state open --json number,title,state
+```
+
+### 4. Report Progress
+
+Summarize:
+- How many issues are open/closed
+- How many PRs are open/merged
+- Which agents are active/stale
+
+### 5. Check for Completion
+
+If all issues are closed and all PRs are merged, the project is complete!
+- Update your status to "exited:success"
+- Congratulate the user
+- Say "PROJECT COMPLETE" clearly so the system knows to exit
 
 ## Communication
 
@@ -229,7 +284,6 @@ Remember: Let Claude handle Git and GitHub operations directly using `gh` and `g
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
-Number of programmers: {self.num_programmers}
 
 {resume_context}
 
@@ -287,7 +341,6 @@ Check the current state and continue from where you left off."""
 async def run_manager(
     github_repo: str | None,
     clone_path: str | None,
-    num_programmers: int | None,
     verbosity: str = "medium",
     resume: bool = False,
     new_session: bool = False,
@@ -298,7 +351,6 @@ async def run_manager(
     Args:
         github_repo: GitHub repository in OWNER/REPO format (prompted if None).
         clone_path: Local path to clone the repo (defaults to castings/{project}).
-        num_programmers: Number of programmer agents (prompted if None).
         verbosity: Output verbosity level (minimal, medium, verbose).
         resume: If True, automatically resume existing session.
         new_session: If True, always start a new session.
@@ -311,10 +363,6 @@ async def run_manager(
             print("Error: GitHub repository is required.", file=sys.stderr)
             sys.exit(1)
 
-    if num_programmers is None:
-        num_str = input("Number of programmers [2]: ").strip()
-        num_programmers = int(num_str) if num_str else 2
-
     # Derive project name from repo
     project = github_repo.split("/")[-1]
 
@@ -325,7 +373,6 @@ async def run_manager(
     agent = ManagerAgent(
         github_repo=github_repo,
         clone_path=clone_path,
-        num_programmers=num_programmers,
         project=project,
         resume=resume,
         new_session=new_session,

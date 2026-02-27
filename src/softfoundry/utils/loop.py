@@ -10,6 +10,7 @@ Subclasses implement agent-specific logic via abstract methods.
 
 import asyncio
 import sys
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,9 @@ from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.sessions import SessionManager, format_session_info
 from softfoundry.utils.status import get_status_path, read_status, update_status
+
+# Heartbeat interval for status file updates (seconds)
+HEARTBEAT_INTERVAL = 60
 
 
 @dataclass
@@ -171,6 +175,9 @@ class Agent(ABC):
         self._pending_input: str | None = None
         self._is_turn_running = False
 
+        # Heartbeat tracking
+        self._last_heartbeat: float = time.time()
+
     # ─────────────────────────────────────────────────────────────────────────
     # SESSION MANAGEMENT (handled by parent)
     # ─────────────────────────────────────────────────────────────────────────
@@ -269,6 +276,25 @@ class Agent(ABC):
             Status data as a dictionary, or None if file doesn't exist.
         """
         return read_status(self._status_path)
+
+    def _maybe_heartbeat(self) -> None:
+        """Update status file if enough time has passed since last update.
+
+        This ensures the status file's last_update timestamp is fresh,
+        allowing other agents (e.g., the manager) to detect stale agents.
+        """
+        now = time.time()
+        if now - self._last_heartbeat >= HEARTBEAT_INTERVAL:
+            current = self.read_status()
+            if current:
+                # Preserve current status, just refresh the timestamp
+                self.update_status(
+                    current.get("status", "working"),
+                    current.get("details", ""),
+                    current_issue=current.get("current_issue"),
+                    current_pr=current.get("current_pr"),
+                )
+            self._last_heartbeat = now
 
     # ─────────────────────────────────────────────────────────────────────────
     # ABSTRACT METHODS - Must implement
@@ -584,6 +610,9 @@ class Agent(ABC):
                     self._iteration += 1
 
                     result = await self._process_turn()
+
+                    # Update heartbeat after each turn
+                    self._maybe_heartbeat()
 
                     if result.should_exit:
                         return

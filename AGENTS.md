@@ -13,12 +13,14 @@ This document provides instructions for AI coding agents working in this reposit
 
 ## Architecture
 
-The system uses GitHub as the central coordination mechanism:
-- **Tasks** are tracked as GitHub Issues with labels for status and assignment
-- **Programmers** work in git worktrees for parallel development
-- **PRs** are created for each task and reviewed before merging
-- **Status files** at `~/.softfoundry/agents/{project}/` enable health monitoring
+The system uses a **pull-based self-assignment model**:
+- **Manager** sets up the project and creates issues, but does NOT assign tasks
+- **Programmers** self-assign tasks by claiming unassigned issues (race-condition safe)
+- **Reviewers** self-assign PRs to review (race-condition safe)
+- **GitHub** serves as the central coordination mechanism via labels
+- **Status files** at `~/.softfoundry/agents/{project}/` enable health monitoring with heartbeats
 - **Sessions** at `~/.softfoundry/sessions/` enable conversation persistence and crash recovery
+- **Stale detection**: Manager releases tasks from dead agents (no heartbeat for 5+ minutes)
 
 ## Directory Structure
 
@@ -58,12 +60,12 @@ softfoundry/
 ├── sessions/                  # Session persistence files
 │   ├── manager-{name}-{project}.json
 │   ├── programmer-{name}-{project}.json
-│   └── reviewer-reviewer-{project}.json
+│   └── reviewer-{name}-{project}.json
 └── agents/                    # Agent status files
     └── {project}/
         ├── manager.status
         ├── programmer-{name-slug}.status
-        └── reviewer.status
+        └── reviewer-{name-slug}.status
 ```
 
 ## Build/Run Commands
@@ -275,24 +277,30 @@ def on_complete(self) -> None:
 ### Running Agents
 
 ```bash
-# Run the manager agent (interactive - prompts for repo and num programmers)
-uv run python -m softfoundry.agents.manager
+# Run the manager agent (interactive - prompts for repo)
+sf manager
 
 # Run the manager with all options specified
-uv run python -m softfoundry.agents.manager \
+sf manager \
     --github-repo owner/repo \
-    --clone-path castings/myproject \
-    --num-programmers 2
+    --clone-path castings/myproject
 
-# Run a programmer agent (spawned by manager, not usually run manually)
-uv run python -m softfoundry.agents.programmer \
+# Run programmer agents (run as many as you want with different names)
+sf programmer \
     --name "Alice Chen" \
     --github-repo owner/repo \
     --clone-path castings/myproject \
     --project myproject
 
-# Run the reviewer agent (spawned by manager, not usually run manually)
-uv run python -m softfoundry.agents.reviewer \
+sf programmer \
+    --name "Bob Smith" \
+    --github-repo owner/repo \
+    --clone-path castings/myproject \
+    --project myproject
+
+# Run reviewer agents (run as many as you want with different names)
+sf reviewer \
+    --name "Rachel Review" \
     --github-repo owner/repo \
     --clone-path castings/myproject \
     --project myproject
@@ -305,7 +313,6 @@ uv run python -m softfoundry.agents.reviewer \
 |--------|-------------|
 | `--github-repo` | GitHub repository (OWNER/REPO format, prompted if not provided) |
 | `--clone-path` | Local path to clone repo (default: castings/{project}) |
-| `--num-programmers` | Number of programmer agents (prompted if not provided) |
 | `--verbosity` | Output level: minimal, medium, verbose (default: medium) |
 | `--max-iterations` | Safety limit for loop iterations (default: 100) |
 | `--resume` | Automatically resume existing session |
@@ -323,6 +330,7 @@ uv run python -m softfoundry.agents.reviewer \
 **Reviewer:**
 | Option | Description |
 |--------|-------------|
+| `--name` | Reviewer name (required, e.g., "Rachel Review") |
 | `--github-repo` | GitHub repository (required) |
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
@@ -335,6 +343,7 @@ The manager creates these labels on project setup:
 | Label | Color | Purpose |
 |-------|-------|---------|
 | `assignee:{name}` | `#0366d6` | Task assignment (e.g., `assignee:alice-chen`) |
+| `reviewer:{name}` | `#6f42c1` | PR reviewer assignment (e.g., `reviewer:rachel-review`) |
 | `status:pending` | `#fbca04` | Not started |
 | `status:in-progress` | `#0e8a16` | Being worked on |
 | `status:in-review` | `#6f42c1` | PR awaiting review |
