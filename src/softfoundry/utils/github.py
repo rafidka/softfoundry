@@ -6,6 +6,8 @@ helper functions for building GitHub CLI commands.
 
 # Label colors (without # prefix for gh CLI)
 LABEL_COLORS = {
+    # Type labels
+    "type_epic": "5319e7",  # Purple - top-level epic/project issue
     # Assignment labels
     "assignee": "0366d6",  # Blue - task assignment
     "reviewer": "6f42c1",  # Purple - PR reviewer assignment
@@ -18,6 +20,50 @@ LABEL_COLORS = {
     "priority_medium": "fbca04",  # Yellow
     "priority_low": "0e8a16",  # Green
 }
+
+
+# GraphQL mutation templates for sub-issues
+# These are used by agents via `gh api graphql`
+GRAPHQL_GET_ISSUE_NODE_ID = """
+query GetIssueNodeId($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      id
+    }
+  }
+}
+"""
+
+GRAPHQL_ADD_SUB_ISSUE = """
+mutation AddSubIssue($parentId: ID!, $subIssueId: ID!) {
+  addSubIssue(input: {issueId: $parentId, subIssueId: $subIssueId}) {
+    issue {
+      number
+      title
+    }
+    subIssue {
+      number
+      title
+    }
+  }
+}
+"""
+
+GRAPHQL_LIST_SUB_ISSUES = """
+query ListSubIssues($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      subIssues(first: 100) {
+        nodes {
+          number
+          title
+          state
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def get_label_color(label_type: str) -> str:
@@ -58,3 +104,53 @@ def format_inline_signature(name: str) -> str:
         Short signature like "[Rachel Review]"
     """
     return f"[{name}]"
+
+
+def build_get_issue_node_id_command(repo: str, issue_number: int) -> str:
+    """Build a gh api graphql command to get an issue's node ID.
+
+    Args:
+        repo: Repository in OWNER/REPO format.
+        issue_number: The issue number.
+
+    Returns:
+        A gh CLI command string.
+    """
+    owner, name = repo.split("/")
+    return (
+        f"gh api graphql -f query='{GRAPHQL_GET_ISSUE_NODE_ID.strip()}' "
+        f"-f owner='{owner}' -f repo='{name}' -F number={issue_number}"
+    )
+
+
+def build_add_sub_issue_command(parent_node_id: str, sub_issue_node_id: str) -> str:
+    """Build a gh api graphql command to add a sub-issue to a parent.
+
+    Args:
+        parent_node_id: The GraphQL node ID of the parent issue.
+        sub_issue_node_id: The GraphQL node ID of the sub-issue.
+
+    Returns:
+        A gh CLI command string.
+    """
+    return (
+        f"gh api graphql -f query='{GRAPHQL_ADD_SUB_ISSUE.strip()}' "
+        f"-f parentId='{parent_node_id}' -f subIssueId='{sub_issue_node_id}'"
+    )
+
+
+def build_list_sub_issues_command(repo: str, issue_number: int) -> str:
+    """Build a gh api graphql command to list sub-issues of an issue.
+
+    Args:
+        repo: Repository in OWNER/REPO format.
+        issue_number: The parent issue number.
+
+    Returns:
+        A gh CLI command string.
+    """
+    owner, name = repo.split("/")
+    return (
+        f"gh api graphql -f query='{GRAPHQL_LIST_SUB_ISSUES.strip()}' "
+        f"-f owner='{owner}' -f repo='{name}' -F number={issue_number}"
+    )

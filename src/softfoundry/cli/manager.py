@@ -43,6 +43,12 @@ def register_command(app: typer.Typer) -> tuple:
                 help="Local path to clone the repo (default: castings/{project})"
             ),
         ] = None,
+        epic: Annotated[
+            int | None,
+            typer.Option(
+                help="GitHub issue number to use as the top-level epic (prompts to create one if not provided)"
+            ),
+        ] = None,
         verbosity: Annotated[
             Verbosity,
             typer.Option(help="Output verbosity level"),
@@ -67,6 +73,7 @@ def register_command(app: typer.Typer) -> tuple:
                 run_manager(
                     github_repo=github_repo,
                     clone_path=clone_path,
+                    epic=epic,
                     verbosity=verbosity.value,
                     resume=resume,
                     new_session=new_session,

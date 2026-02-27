@@ -25,7 +25,7 @@ softfoundry is designed around three specialized AI agents that work together to
 │                          GitHub                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
 │  │    Issues    │  │     PRs      │  │    Labels    │          │
-│  │  (Tasks)     │  │   (Code)     │  │  (Status)    │          │
+│  │(Epic+Tasks)  │  │   (Code)     │  │  (Status)    │          │
 │  └──────────────┘  └──────────────┘  └──────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
            │                  │                  │
@@ -74,8 +74,9 @@ The orchestrator responsible for project setup and monitoring.
 
 **Responsibilities:**
 - Project initialization (cloning, creating PROJECT.md)
-- Task planning (creating GitHub issues)
-- Label management (status, priority, assignee)
+- Epic management (finding or creating the top-level epic issue)
+- Task planning (creating sub-issues under the epic)
+- Label management (status, priority, assignee, type:epic)
 - Guiding user to start other agents
 - Health monitoring via status files
 
@@ -83,7 +84,8 @@ The orchestrator responsible for project setup and monitoring.
 - Runs continuously in a loop
 - 60-second polling interval for monitoring
 - Can detect stale agents (>5 minutes without update)
-- Exits when all issues are closed
+- Uses GitHub's native sub-issues to link tasks to the epic
+- Exits when all sub-issues of the epic are closed
 
 ```python
 # Core loop structure
@@ -383,11 +385,33 @@ Labels are the primary coordination mechanism:
 
 | Label Pattern | Purpose |
 |---------------|---------|
+| `type:epic` | Top-level epic issue (parent of sub-tasks) |
 | `status:pending` | Task available for work |
 | `status:in-progress` | Task being implemented |
 | `status:in-review` | PR created, awaiting review |
 | `assignee:{slug}` | Task assigned to programmer |
 | `priority:{level}` | Task priority (high/medium/low) |
+
+### Epic and Sub-Issue Structure
+
+GitHub's native sub-issues feature is used to link tasks to the epic:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    EPIC STRUCTURE                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Epic Issue (#1) [type:epic]                                 │
+│  ├─► Sub-issue #2 [status:pending, priority:high]           │
+│  ├─► Sub-issue #3 [status:in-progress, assignee:alice-chen] │
+│  ├─► Sub-issue #4 [status:in-review]                        │
+│  └─► Sub-issue #5 [status:pending, priority:low]            │
+│                                                              │
+│  Sub-issues are linked using GitHub's GraphQL API:          │
+│  └─► addSubIssue mutation                                   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ### Task Assignment Flow
 
@@ -396,15 +420,18 @@ Labels are the primary coordination mechanism:
 │                    TASK ASSIGNMENT FLOW                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Manager creates issue with:                                 │
+│  Manager creates epic with:                                  │
+│  └─ type:epic label                                         │
+│                                                              │
+│  Manager creates sub-issue with:                             │
 │  ├─ status:pending                                          │
 │  ├─ priority:medium                                         │
-│  └─ assignee:alice-chen (optional)                          │
+│  └─ Linked to epic via addSubIssue GraphQL mutation         │
 │                                                              │
 │  Programmer queries for work:                               │
 │  ├─ First: issues with own assignee label + status:pending  │
 │  ├─ Then: issues with status:pending (no assignee)          │
-│  └─ If none: check if all issues closed → exit              │
+│  └─ If none: check if all sub-issues closed → exit          │
 │                                                              │
 │  Programmer starts work:                                     │
 │  ├─ Removes: status:pending                                 │
@@ -415,7 +442,7 @@ Labels are the primary coordination mechanism:
 │  └─ Adds: status:in-review                                  │
 │                                                              │
 │  Reviewer merges PR:                                         │
-│  └─ Issue closed automatically via "Closes #N"              │
+│  └─ Sub-issue closed automatically via "Closes #N"          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -448,29 +475,35 @@ git branch -D feature/issue-3-auth
 
 ## Data Flow
 
-### Issue to Merged PR
+### Epic to Completed Project
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                      DATA FLOW: ISSUE TO PR                       │
+│                      DATA FLOW: EPIC TO PR                        │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                   │
-│  1. Manager creates issue                                         │
+│  1. Manager creates/finds epic issue                              │
+│     └─► gh issue create --label "type:epic" OR use --epic arg   │
+│                                                                   │
+│  2. Manager creates sub-issue                                     │
 │     └─► gh issue create --title "..." --body "..." --label ...  │
 │                                                                   │
-│  2. Programmer finds issue                                        │
+│  3. Manager links sub-issue to epic                               │
+│     └─► gh api graphql (addSubIssue mutation)                    │
+│                                                                   │
+│  4. Programmer finds sub-issue                                    │
 │     └─► gh issue list --label "assignee:alice-chen" ...         │
 │                                                                   │
-│  3. Programmer creates worktree + branch                          │
+│  5. Programmer creates worktree + branch                          │
 │     └─► git worktree add ... -b feature/issue-3-auth            │
 │                                                                   │
-│  4. Programmer updates labels                                     │
+│  6. Programmer updates labels                                     │
 │     └─► gh issue edit 3 --remove-label pending --add-label ...  │
 │                                                                   │
-│  5. Programmer implements (Edit, Write tools)                     │
+│  7. Programmer implements (Edit, Write tools)                     │
 │     └─► Claude modifies files in worktree                        │
 │                                                                   │
-│  6. Programmer commits + pushes                                   │
+│  8. Programmer commits + pushes                                   │
 │     └─► git add . && git commit && git push -u origin ...       │
 │                                                                   │
 │  7. Programmer creates PR                                         │

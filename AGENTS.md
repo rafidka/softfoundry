@@ -13,11 +13,12 @@ This document provides instructions for AI coding agents working in this reposit
 
 ## Architecture
 
-The system uses a **pull-based self-assignment model**:
-- **Manager** sets up the project and creates issues, but does NOT assign tasks
-- **Programmers** self-assign tasks by claiming unassigned issues (race-condition safe)
+The system uses an **epic-based, pull-based self-assignment model**:
+- **Epic**: A top-level GitHub issue representing the current body of work. All tasks are sub-issues of this epic.
+- **Manager** sets up the project, finds/creates the epic, and creates sub-issues, but does NOT assign tasks
+- **Programmers** self-assign tasks by claiming unassigned sub-issues (race-condition safe)
 - **Reviewers** self-assign PRs to review (race-condition safe)
-- **GitHub** serves as the central coordination mechanism via labels
+- **GitHub** serves as the central coordination mechanism via labels and native sub-issues
 - **Status files** at `~/.softfoundry/agents/{project}/` enable health monitoring with heartbeats
 - **Sessions** at `~/.softfoundry/sessions/` enable conversation persistence and crash recovery
 - **Stale detection**: Manager releases tasks from dead agents (no heartbeat for 5+ minutes)
@@ -285,6 +286,12 @@ sf manager \
     --github-repo owner/repo \
     --clone-path castings/myproject
 
+# Run the manager with an existing epic issue
+sf manager \
+    --github-repo owner/repo \
+    --clone-path castings/myproject \
+    --epic 42
+
 # Run programmer agents (run as many as you want with different names)
 sf programmer \
     --name "Alice Chen" \
@@ -313,10 +320,10 @@ sf reviewer \
 |--------|-------------|
 | `--github-repo` | GitHub repository (OWNER/REPO format, prompted if not provided) |
 | `--clone-path` | Local path to clone repo (default: castings/{project}) |
+| `--epic` | GitHub issue number to use as the top-level epic (prompts to create one if not provided) |
 | `--verbosity` | Output level: minimal, medium, verbose (default: medium) |
 | `--max-iterations` | Safety limit for loop iterations (default: 100) |
-| `--resume` | Automatically resume existing session |
-| `--new-session` | Start fresh, deleting any existing session |
+| `--session` | Session mode: auto (prompt), resume, or new (default: auto) |
 
 **Programmer:**
 | Option | Description |
@@ -342,6 +349,7 @@ The manager creates these labels on project setup:
 
 | Label | Color | Purpose |
 |-------|-------|---------|
+| `type:epic` | `#5319e7` | Top-level epic issue containing sub-tasks |
 | `assignee:{name}` | `#0366d6` | Task assignment (e.g., `assignee:alice-chen`) |
 | `reviewer:{name}` | `#6f42c1` | PR reviewer assignment (e.g., `reviewer:rachel-review`) |
 | `status:pending` | `#fbca04` | Not started |
@@ -365,6 +373,20 @@ Agents maintain status files at `~/.softfoundry/agents/{project}/`:
   "details": "Implementing issue #3: Add trigonometric functions",
   "current_issue": 3,
   "current_pr": null,
+  "last_update": "2026-02-13T14:30:00Z",
+  "started_at": "2026-02-13T14:00:00Z"
+}
+```
+
+Manager agents also include:
+```json
+{
+  "agent_type": "manager",
+  "project": "scicalc",
+  "pid": 12345,
+  "status": "working",
+  "details": "Monitoring epic progress",
+  "current_epic": 42,
   "last_update": "2026-02-13T14:30:00Z",
   "started_at": "2026-02-13T14:00:00Z"
 }
