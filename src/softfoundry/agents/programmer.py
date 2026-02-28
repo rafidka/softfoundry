@@ -5,6 +5,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS, format_signature
 from softfoundry.utils.loop import Agent, AgentConfig
 from softfoundry.utils.status import sanitize_name
@@ -30,6 +31,7 @@ class ProgrammerAgent(Agent):
         github_repo: str,
         clone_path: str,
         project: str,
+        epic: int,
         resume: bool = False,
         new_session: bool = False,
         verbosity: str = "medium",
@@ -42,6 +44,7 @@ class ProgrammerAgent(Agent):
             github_repo: GitHub repository in OWNER/REPO format.
             clone_path: Path to the main git clone.
             project: Project name.
+            epic: GitHub issue number of the epic to work on.
             resume: If True, automatically resume existing session.
             new_session: If True, force a new session.
             verbosity: Output verbosity level.
@@ -51,19 +54,53 @@ class ProgrammerAgent(Agent):
         self.name = name
         self.name_slug = sanitize_name(name)
         self.github_repo = github_repo
-        self.clone_path = clone_path
+        self.clone_path = str(Path(clone_path).resolve())  # Always use absolute path
         self.project = project
-        self.worktree_path = f"{clone_path}-{self.name_slug}"
+        self.epic = epic
+        self.worktree_path = f"{self.clone_path}-{self.name_slug}"
 
-        # Determine working directory
-        cwd = self.worktree_path if Path(self.worktree_path).exists() else clone_path
+        # Determine working directory (prefer worktree if exists, then clone)
+        if Path(self.worktree_path).exists():
+            cwd = self.worktree_path
+        elif Path(self.clone_path).exists():
+            cwd = self.clone_path
+        else:
+            cwd = None
+
+        # Create MCP orchestrator server
+        orchestrator = create_orchestrator_server(
+            name="orchestrator",
+            github_repo=github_repo,
+        )
 
         # Build config and delegate to parent
         config = AgentConfig(
             namespace=project,
             agent_type=AGENT_TYPE,
             agent_name=name,
-            allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+            allowed_tools=[
+                "Read",
+                "Edit",
+                "Glob",
+                "Write",
+                "Bash",
+                "Grep",
+                # Epic/Issue tools
+                "mcp__orchestrator__get_epic_status",
+                "mcp__orchestrator__get_sub_issue",
+                "mcp__orchestrator__list_available_sub_issues",
+                "mcp__orchestrator__list_my_sub_issues",
+                "mcp__orchestrator__claim_sub_issue",
+                "mcp__orchestrator__update_sub_issue_status",
+                # PR tools
+                "mcp__orchestrator__get_pr_status",
+                "mcp__orchestrator__list_my_prs",
+                "mcp__orchestrator__mark_feedback_addressed",
+                # Activity tools
+                "mcp__orchestrator__log_activity",
+                "mcp__orchestrator__get_activity_log",
+            ],
+            mcp_servers={"orchestrator": orchestrator},
             permission_mode="acceptEdits",
             cwd=cwd,
             max_iterations=max_iterations,
@@ -85,7 +122,28 @@ GitHub repo: {self.github_repo}
 Main clone: {self.clone_path}
 Your worktree: {self.worktree_path}
 Status file: {self._status_path}
+Epic: #{self.epic}
 Your assignee label: assignee:{self.name_slug}
+
+## Orchestrator MCP Tools
+
+You have access to MCP tools for coordinating with other agents. Use these instead of raw `gh` CLI commands for issue/PR management:
+
+**Epic/Issue Tools:**
+- `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
+- `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+- `mcp__orchestrator__list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues
+- `mcp__orchestrator__list_my_sub_issues(epic_number, agent_name)` - List your assigned sub-issues
+- `mcp__orchestrator__claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue
+- `mcp__orchestrator__update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
+
+**PR Tools:**
+- `mcp__orchestrator__get_pr_status(pr_number)` - Get PR status including `has_feedback` flag
+- `mcp__orchestrator__list_my_prs(author_name)` - List your open PRs
+- `mcp__orchestrator__mark_feedback_addressed(pr_number)` - Mark feedback as addressed
+
+**Activity Tools:**
+- `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
 
 ## Status File Updates
 
@@ -113,17 +171,10 @@ Status values: starting, idle, working, waiting_review, addressing_feedback, exi
 
 This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL share the SAME GitHub account. This means:
 
-1. **All GitHub activity appears to come from the same user** - When you see issues, PRs, or comments, they may have been created by OTHER agents, not you.
-
-2. **Do NOT be confused by "your own" activity** - If you see a PR, comment, or review that you don't remember creating, it was likely created by another agent (another Programmer, a Reviewer, or the Manager).
-
-3. **Always identify yourself** - Since GitHub can't distinguish between agents, include your signature in all comments and PR descriptions: {format_signature(self.name, "Programmer")}
-
-4. **Coordinate via labels, not usernames** - Use `assignee:{{slug}}` labels to track task ownership. The GitHub author/assignee fields will show the same user for everyone, so IGNORE those and trust the labels.
-
-5. **PRs created by "you" may be from other programmers** - Check the PR body for the **Author:** field to see which programmer actually created it.
-
-6. **Reviews are from Reviewers, not you** - When you see reviews on your PR, they come from Reviewer agents. Look for their signature like `**[Rachel Review - Reviewer]:**` to identify them.
+1. **All GitHub activity appears to come from the same user** - PRs, comments may be from OTHER agents.
+2. **Always identify yourself** - Include your signature in comments and PR descriptions: {format_signature(self.name, "Programmer")}
+3. **Coordinate via labels** - Use `assignee:{{slug}}` and `reviewer:{{slug}}` labels to track ownership.
+4. **Check the Author field in PRs** - PRs have `**Author:** Name (Programmer)` in the body.
 
 ## Initial Setup: Self-Registration
 
@@ -132,16 +183,19 @@ On first run, create your assignee label if it doesn't exist:
 gh label create "assignee:{self.name_slug}" --color "{LABEL_COLORS["assignee"]}" --repo {self.github_repo} --force 2>/dev/null || true
 ```
 
+Then log your start:
+```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="started", message="Started and ready to work", issue_number=0, pr_number=0)
+```
+
 ## Workflow
 
 ### 0. Check for Existing Open PRs (IMPORTANT - Do This First!)
 
 Before looking for new tasks, check if you already have an open PR:
-```bash
-gh pr list --repo {self.github_repo} --state open --json number,title,body
 ```
-
-Look for PRs where the body contains "**Author:** {self.name}".
+mcp__orchestrator__list_my_prs(author_name="{self.name}")
+```
 
 **If you have an open PR:**
 - DO NOT start a new task!
@@ -152,63 +206,40 @@ Look for PRs where the body contains "**Author:** {self.name}".
 **If you have NO open PRs:**
 - Continue to Section 1 to find a new task
 
-This rule is critical: **ONE active PR at a time per programmer!** Creating multiple PRs leads to merge conflicts and blocked work.
+This rule is critical: **ONE active PR at a time per programmer!**
 
-### 1. Find an Unassigned Pending Task
+### 1. Find an Unassigned Pending Sub-Issue
 
-Query all pending issues with their labels:
-```bash
-gh issue list --repo {self.github_repo} --label "status:pending" --json number,title,body,labels
+```
+mcp__orchestrator__list_available_sub_issues(epic_number={self.epic}, priority="")
 ```
 
-From the results, find an issue that does NOT have any "assignee:*" label.
-Parse the `labels` array and check that no label name starts with "assignee:".
+This returns sub-issues from the epic that are unassigned and have status `pending`.
 
-### 2. Claim the Task (Race-Condition Safe)
+### 2. Claim the Task
 
-When you find an unassigned task, claim it using this algorithm:
+When you find an unassigned task:
 
-**Step 1:** Add your assignee label:
-```bash
-gh issue edit ISSUE_NUMBER --repo {self.github_repo} --add-label "assignee:{self.name_slug}"
+```
+mcp__orchestrator__claim_sub_issue(epic_number={self.epic}, sub_issue_number=ISSUE_NUMBER, agent_name="{self.name}")
 ```
 
-**Step 2:** Wait briefly for concurrent claims to settle:
-```bash
-sleep 0.2
+This atomically adds your assignee label and sets status to `in-progress`.
+
+Log the claim:
 ```
-
-**Step 3:** Re-fetch the issue to check for conflicts:
-```bash
-gh issue view ISSUE_NUMBER --repo {self.github_repo} --json labels
-```
-
-**Step 4:** Check the labels for conflicts:
-- Parse the labels array for all labels starting with "assignee:"
-- If ONLY your label (assignee:{self.name_slug}) is present: SUCCESS - you claimed it!
-- If MULTIPLE assignee labels exist:
-  - Use alphabetical ordering as tie-breaker: first slug alphabetically wins
-  - If your slug comes first: you win - remove the other assignee labels
-  - If another slug comes first: you lost - remove YOUR label and try another task:
-    ```bash
-    gh issue edit ISSUE_NUMBER --repo {self.github_repo} --remove-label "assignee:{self.name_slug}"
-    ```
-    Then go back to step 1 and find a different task.
-
-**Step 5:** Once you've successfully claimed the task:
-```bash
-gh issue edit ISSUE_NUMBER --repo {self.github_repo} --remove-label "status:pending" --add-label "status:in-progress"
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="claimed", message="Starting work on this issue", issue_number=ISSUE_NUMBER, pr_number=0)
 ```
 
 ### 3. If No Unassigned Pending Tasks
 
-Check if project is complete:
-```bash
-gh issue list --repo {self.github_repo} --state open --json number
+Check the epic status:
+```
+mcp__orchestrator__get_epic_status(epic_number={self.epic})
 ```
 
-If no open issues, exit gracefully with status "exited:success".
-If there are open issues but they're all assigned or in-progress, just exit (other programmers are working on them).
+If all sub-issues are closed, exit gracefully with status "exited:success".
+If there are open issues but they're all assigned, just exit (other programmers are working on them).
 
 ### 4. Start Working on the Task
 
@@ -241,7 +272,7 @@ c. Update your status file with current_issue
 - Commit frequently with clear messages
 
 Periodically update:
-- Issue with progress: `gh issue comment N --body "{format_signature(self.name, "Programmer")} Progress: ..."`
+- Log progress: `mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="progress", message="...", issue_number=N, pr_number=0)`
 - Your status file
 
 ### 6. Create a PR
@@ -260,107 +291,94 @@ git fetch origin
 git rebase origin/main
 ```
 
-If there are conflicts during rebase:
-1. Resolve them in each file
-2. `git add <resolved-files>`
-3. `git rebase --continue`
-4. Repeat until rebase is complete
+If there are conflicts during rebase, resolve them and continue.
 
 Then push:
 ```bash
 git push -u origin feature/issue-N-slug
 ```
 
-Create the PR (include your name as author):
+Create the PR with your assignee label:
 ```bash
 gh pr create --repo {self.github_repo} --title "Title" --body "## Summary
 
 Description
 
-**Author:** {self.name} (Programmer)
-
-Closes #N"
+Closes #N" --label "assignee:{self.name_slug}"
 ```
 
-Update labels:
-```bash
-gh issue edit N --repo {self.github_repo} --remove-label "status:in-progress" --add-label "status:in-review"
+Update the sub-issue status:
+```
+mcp__orchestrator__update_sub_issue_status(epic_number={self.epic}, sub_issue_number=N, new_status="in-review")
+```
+
+Log the PR creation:
+```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="pr_created", message="Created PR for review", issue_number=N, pr_number=PR_NUMBER)
 ```
 
 Update your status file with current_pr and status "waiting_review".
 
 ### 7. Wait for Review and Handle Feedback
 
-Check PR status (NOTE: we use `latestReviews` not `reviewDecision` because `reviewDecision` only works with branch protection):
-```bash
-gh pr view PR_NUMBER --repo {self.github_repo} --json state,mergedAt,latestReviews
+Check PR status using the MCP tool:
+```
+mcp__orchestrator__get_pr_status(pr_number=PR_NUMBER)
 ```
 
-**If PR is merged** (`mergedAt` is not null):
+This returns a JSON object with:
+- `state`: "open", "closed", or "merged"
+- `has_feedback`: True if `status:feedback-requested` label is present
+- `review_state`: "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "PENDING", or null
+
+**If PR state is "merged":**
 - Clean up and find next task (go to section 9, then section 10)
 
-**If `latestReviews` array is empty:**
-- No reviews yet. Wait 30 seconds and check again.
-
-**If `latestReviews` has entries, check each review's `state` field:**
-
-The `state` can be: `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`, `PENDING`
-
-**If any review has `state: "CHANGES_REQUESTED"`:**
-1. Read the review body (the overall review comment):
+**If `has_feedback` is True:**
+1. Read the review comments:
    ```bash
-   gh pr view PR_NUMBER --repo {self.github_repo} --json latestReviews --jq '.latestReviews[] | select(.state == "CHANGES_REQUESTED") | .body'
-   ```
-
-2. Read inline comments on the code:
-   ```bash
+   gh api repos/{self.github_repo}/pulls/PR_NUMBER/reviews --jq '.[] | select(.state == "CHANGES_REQUESTED") | .body'
    gh api repos/{self.github_repo}/pulls/PR_NUMBER/comments --jq '.[] | "File: " + .path + " Line: " + (.line|tostring) + " Comment: " + .body'
    ```
 
-3. Address each piece of feedback by making the necessary code changes
+2. Address each piece of feedback by making the necessary code changes
 
-4. Commit and push your changes:
+3. Commit and push your changes:
    ```bash
    git add -A
    git commit -m "fix: address review feedback"
    git push
    ```
 
-5. Add a comment indicating you've addressed the feedback:
-   ```bash
-   gh pr comment PR_NUMBER --repo {self.github_repo} --body "{format_signature(self.name, "Programmer")} Addressed review feedback. Ready for re-review."
+4. Mark feedback as addressed:
+   ```
+   mcp__orchestrator__mark_feedback_addressed(pr_number=PR_NUMBER)
+   ```
+
+5. Log the activity:
+   ```
+   mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="feedback_addressed", message="Addressed reviewer feedback", issue_number=N, pr_number=PR_NUMBER)
    ```
 
 6. Update status to "addressing_feedback" while working, then back to "waiting_review"
 
-**If all reviews have `state: "APPROVED"`:**
-- Great! Your PR has been approved. Now YOU should merge it (don't wait for the reviewer):
+**If `review_state` is "APPROVED" and `has_feedback` is False:**
+- Great! Your PR has been approved. Now YOU should merge it:
   ```bash
   gh pr merge PR_NUMBER --repo {self.github_repo} --squash --delete-branch
   ```
 - If merge succeeds, go to Section 9 to clean up, then Section 10 to find next task
-- If merge fails due to conflicts, go to Section 8 to resolve them, then try merging again
+- If merge fails due to conflicts, go to Section 8 to resolve them
 
-**If reviews only have `state: "COMMENTED"`:**
-- Read the comments to see if any action is needed
-- If just informational, wait for a formal approval or change request
-
-**Also check for merge conflicts or conflict-related comments:**
-```bash
-# Check if PR has merge conflicts
-gh pr view PR_NUMBER --repo {self.github_repo} --json mergeable,mergeStateStatus
-
-# Check for comments mentioning conflicts
-gh pr view PR_NUMBER --repo {self.github_repo} --json comments --jq '.comments[].body' | grep -i "conflict"
-```
-
-If `mergeable` is `false` or `mergeStateStatus` is `"DIRTY"`, or if there are comments about conflicts:
+**If `has_conflicts` is True:**
 - Go to Section 8 to resolve conflicts immediately
-- Don't wait for review feedback - fix conflicts first!
+
+**If no reviews yet (`review_state` is null or "PENDING"):**
+- Wait 30 seconds and check again
 
 ### 8. Handle Conflicts
 
-If PR has conflicts (reviewer may comment about this, or you see it in PR status):
+If PR has conflicts:
 ```bash
 cd {self.worktree_path}
 git fetch origin
@@ -382,7 +400,10 @@ git worktree remove {self.worktree_path} --force
 git branch -D feature/issue-N-slug
 ```
 
-Or just create a new branch for the next task in your worktree.
+Log the merge:
+```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="merged", message="PR merged successfully", issue_number=N, pr_number=PR_NUMBER)
+```
 
 ### 10. Find Next Task (Loop)
 
@@ -390,14 +411,13 @@ After your PR is merged:
 
 1. Update your status file: set `current_issue` and `current_pr` to null, status to "idle"
 
-2. Go back to **Section 1: Find an Unassigned Pending Task**
+2. Go back to **Section 1: Find an Unassigned Pending Sub-Issue**
 
 3. If you find a task, claim it and continue working
 
 4. If no unassigned tasks remain:
-   - Check if project is complete (no open issues at all)
-   - If complete: exit with status "exited:success"
-   - If there are still open issues (being worked on by others): exit gracefully
+   - Check epic status - if all complete, exit with "exited:success"
+   - If tasks are in progress by others, exit gracefully
 
 **Keep working until there are no more tasks to claim!**
 
@@ -405,7 +425,8 @@ After your PR is merged:
 
 - Always work in your worktree, not the main clone
 - Keep your status file updated so the manager knows you're alive
-- If you crash, read your status file on restart to resume
+- Use the `has_feedback` flag from `get_pr_status` to detect when to address feedback
+- Log activities to keep other agents informed of your progress
 - When all tasks are done, exit with status "exited:success"
 - If you need clarification on a task, ask the user
 """
@@ -418,10 +439,12 @@ After your PR is merged:
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
 Your worktree: {self.worktree_path}
+Epic: #{self.epic}
 
 {resume_context}
 
-Find a task to work on and start implementing it.
+First, check if you have any existing open PRs. If so, check their status.
+Otherwise, find a sub-issue from the epic to work on.
 """
 
     def _get_resume_context(self) -> str:
@@ -488,6 +511,7 @@ async def run_programmer(
     github_repo: str,
     clone_path: str,
     project: str,
+    epic: int,
     verbosity: str = "medium",
     resume: bool = False,
     new_session: bool = False,
@@ -500,6 +524,7 @@ async def run_programmer(
         github_repo: GitHub repository in OWNER/REPO format.
         clone_path: Path to the main git clone.
         project: Project name.
+        epic: GitHub issue number of the epic to work on.
         verbosity: Output verbosity level.
         resume: If True, automatically resume existing session.
         new_session: If True, always start a new session.
@@ -510,6 +535,7 @@ async def run_programmer(
         github_repo=github_repo,
         clone_path=clone_path,
         project=project,
+        epic=epic,
         resume=resume,
         new_session=new_session,
         verbosity=verbosity,

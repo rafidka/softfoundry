@@ -297,20 +297,23 @@ sf programmer \
     --name "Alice Chen" \
     --github-repo owner/repo \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 
 sf programmer \
     --name "Bob Smith" \
     --github-repo owner/repo \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 
 # Run reviewer agents (run as many as you want with different names)
 sf reviewer \
     --name "Rachel Review" \
     --github-repo owner/repo \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 ```
 
 ### CLI Options
@@ -332,7 +335,8 @@ sf reviewer \
 | `--github-repo` | GitHub repository (required) |
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
-| `--verbosity`, `--max-iterations`, `--resume`, `--new-session` | Same as manager |
+| `--epic` | GitHub issue number of the epic to work on (required) |
+| `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 **Reviewer:**
 | Option | Description |
@@ -341,7 +345,8 @@ sf reviewer \
 | `--github-repo` | GitHub repository (required) |
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
-| `--verbosity`, `--max-iterations`, `--resume`, `--new-session` | Same as manager |
+| `--epic` | GitHub issue number of the epic to work on (required) |
+| `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 ### GitHub Label Schema
 
@@ -355,6 +360,7 @@ The manager creates these labels on project setup:
 | `status:pending` | `#fbca04` | Not started |
 | `status:in-progress` | `#0e8a16` | Being worked on |
 | `status:in-review` | `#6f42c1` | PR awaiting review |
+| `status:feedback-requested` | `#d73a4a` | Reviewer requested changes on PR |
 | `priority:high` | `#d73a4a` | High priority |
 | `priority:medium` | `#fbca04` | Medium priority |
 | `priority:low` | `#0e8a16` | Low priority |
@@ -443,6 +449,40 @@ Manager agents also include:
 
 **`utils/input.py`** - Input handling:
 - `read_multiline_input()` - Read multi-line user input
+
+### MCP Orchestrator
+
+The `mcp/` package provides an MCP server for agent coordination. All agents use this server instead of raw `gh` CLI commands for GitHub coordination.
+
+**`mcp/orchestrator.py`** - MCP server with tools:
+
+*Epic/Issue Tools:*
+- `get_epic_status(epic_number)` - Get epic with all sub-issue statuses
+- `get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+- `list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues
+- `list_my_sub_issues(epic_number, agent_name)` - List assigned sub-issues
+- `claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue
+- `update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
+- `create_sub_issue(epic_number, title, body, priority)` - Create and link sub-issue
+- `close_epic(epic_number)` - Close the epic
+
+*PR Tools:*
+- `get_pr_status(pr_number)` - Get PR status with `has_feedback` flag
+- `list_my_prs(author_name)` - List PRs by author
+- `list_prs_for_review(epic_number)` - List PRs awaiting review
+- `claim_pr_review(pr_number, reviewer_name)` - Claim PR for review
+- `request_changes(pr_number, comment)` - Request changes (adds feedback-requested label)
+- `mark_feedback_addressed(pr_number)` - Mark feedback addressed (removes label)
+- `approve_pr(pr_number, comment)` - Approve PR
+
+*Activity Tools:*
+- `log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity to epic
+- `get_activity_log(epic_number, limit)` - Get recent activity
+
+**`mcp/github_client.py`** - Async GitHub API client:
+- Uses `httpx` for async HTTP
+- Authenticates via `gh auth token`
+- REST and GraphQL API support
 
 ### Castings Directory
 

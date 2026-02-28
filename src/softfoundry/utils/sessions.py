@@ -6,16 +6,17 @@ across different project directories and allow easy backup/cleanup.
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+
+from pydantic import BaseModel
 
 # Centralized sessions directory
 SESSIONS_DIR = Path.home() / ".softfoundry" / "sessions"
 
 
-@dataclass
-class SessionInfo:
+class SessionInfo(BaseModel):
     """Information about a saved agent session."""
 
     session_id: str

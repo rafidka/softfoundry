@@ -10,7 +10,9 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.79.0",
     "claude-agent-sdk>=0.1.35",
+    "httpx>=0.28.1",
     "prompt-toolkit>=3.0.0",
+    "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
     "rich>=14.3.2",
     "typer>=0.24.1",
@@ -23,3 +25,19 @@ sf = "softfoundry.cli:app"
 [build-system]
 requires = ["uv_build>=0.10.1,<0.11.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.3.0",
+    "respx>=0.22.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+filterwarnings = [
+    "ignore::pytest.PytestRemovedIn9Warning",
+]

@@ -684,9 +684,43 @@ To add a new agent type:
 3. Define system prompt and workflow
 4. Add CLI entry point in `pyproject.toml`
 
-### Custom Tools
+### MCP Orchestrator
 
-The SDK supports custom tools via `create_sdk_mcp_server()`. See `docs/ClaudeAgentSDK.md` for details.
+The system includes a custom MCP server (`src/softfoundry/mcp/orchestrator.py`) that all agents use for coordination:
+
+**Purpose:**
+- Provides structured access to GitHub state (epics, sub-issues, PRs)
+- Enables activity logging on the epic issue
+- Manages feedback detection via `status:feedback-requested` label
+
+**Key Components:**
+- `github_client.py` - Async GitHub API client using `httpx` and `gh auth token`
+- `orchestrator.py` - MCP server with 17 tools for epic/issue/PR/activity management
+- `types.py` - Type definitions (`EpicStatus`, `PRStatus`, `ActivityEntry`, etc.)
+
+**How Agents Use It:**
+```python
+from softfoundry.mcp import create_orchestrator_server
+
+orchestrator = create_orchestrator_server(
+    name="orchestrator",
+    github_repo="owner/repo",
+)
+
+config = AgentConfig(
+    mcp_servers={"orchestrator": orchestrator},
+    allowed_tools=[
+        "mcp__orchestrator__get_pr_status",
+        "mcp__orchestrator__claim_sub_issue",
+        # ...
+    ],
+)
+```
+
+**Feedback Detection:**
+- Reviewer uses `request_changes()` which adds `status:feedback-requested` label
+- Programmer checks `get_pr_status()` which returns `has_feedback: true`
+- Programmer uses `mark_feedback_addressed()` to remove the label after fixing
 
 ### Hooks
 

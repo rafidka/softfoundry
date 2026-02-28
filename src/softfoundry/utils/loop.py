@@ -12,7 +12,7 @@ import asyncio
 import sys
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +23,7 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
 )
+from pydantic import BaseModel
 
 from softfoundry.utils.env import get_claude_code_token
 from softfoundry.utils.interactive import InteractiveInput
@@ -35,8 +36,7 @@ from softfoundry.utils.status import get_status_path, read_status, update_status
 HEARTBEAT_INTERVAL = 60
 
 
-@dataclass
-class TurnResult:
+class TurnResult(BaseModel):
     """Result of processing one agent turn.
 
     Attributes:
@@ -64,8 +64,7 @@ def extract_assistant_text(message: AssistantMessage) -> str:
     return "\n".join(texts)
 
 
-@dataclass
-class AgentConfig:
+class AgentConfig(BaseModel):
     """Configuration for an agent.
 
     Attributes:
@@ -75,6 +74,7 @@ class AgentConfig:
         allowed_tools: List of tools the agent can use.
         permission_mode: Permission mode for Claude SDK.
         cwd: Working directory for the agent.
+        mcp_servers: MCP server configurations (dict of name -> config).
         max_iterations: Maximum loop iterations (safety limit).
         resume: If True, automatically resume existing session.
         new_session: If True, force a new session (delete existing).
@@ -94,6 +94,7 @@ class AgentConfig:
         "acceptEdits"
     )
     cwd: str | Path | None = None
+    mcp_servers: dict[str, Any] = field(default_factory=dict)
 
     # Loop behavior
     max_iterations: int = 100
@@ -539,6 +540,7 @@ class Agent(ABC):
         options = ClaudeAgentOptions(
             allowed_tools=self.config.allowed_tools,
             permission_mode=self.config.permission_mode,
+            mcp_servers=self.config.mcp_servers if self.config.mcp_servers else {},
             resume=self._session_id,
             system_prompt=self.get_system_prompt(),
             cwd=self._get_cwd(),

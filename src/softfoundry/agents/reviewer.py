@@ -5,6 +5,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import (
     LABEL_COLORS,
     format_inline_signature,
@@ -36,6 +37,7 @@ class ReviewerAgent(Agent):
         github_repo: str,
         clone_path: str,
         project: str,
+        epic: int,
         resume: bool = False,
         new_session: bool = False,
         verbosity: str = "medium",
@@ -48,6 +50,7 @@ class ReviewerAgent(Agent):
             github_repo: GitHub repository in OWNER/REPO format.
             clone_path: Path to the main git clone.
             project: Project name.
+            epic: GitHub issue number of the epic to work on.
             resume: If True, automatically resume existing session.
             new_session: If True, force a new session.
             verbosity: Output verbosity level.
@@ -57,11 +60,18 @@ class ReviewerAgent(Agent):
         self.name = name
         self.name_slug = sanitize_name(name)
         self.github_repo = github_repo
-        self.clone_path = clone_path
+        self.clone_path = str(Path(clone_path).resolve())  # Always use absolute path
         self.project = project
+        self.epic = epic
 
-        # Determine working directory
-        cwd = str(Path(clone_path).resolve()) if Path(clone_path).exists() else None
+        # Determine working directory (only set if path exists)
+        cwd = self.clone_path if Path(self.clone_path).exists() else None
+
+        # Create MCP orchestrator server
+        orchestrator = create_orchestrator_server(
+            name="orchestrator",
+            github_repo=github_repo,
+        )
 
         # Build config and delegate to parent
         # Reviewer doesn't need Edit/Write since it only reviews
@@ -69,7 +79,25 @@ class ReviewerAgent(Agent):
             namespace=project,
             agent_type=AGENT_TYPE,
             agent_name=name,
-            allowed_tools=["Read", "Glob", "Bash", "Grep"],
+            allowed_tools=[
+                "Read",
+                "Glob",
+                "Bash",
+                "Grep",
+                # Epic/Issue tools
+                "mcp__orchestrator__get_epic_status",
+                "mcp__orchestrator__get_sub_issue",
+                # PR tools
+                "mcp__orchestrator__get_pr_status",
+                "mcp__orchestrator__list_prs_for_review",
+                "mcp__orchestrator__claim_pr_review",
+                "mcp__orchestrator__request_changes",
+                "mcp__orchestrator__approve_pr",
+                # Activity tools
+                "mcp__orchestrator__log_activity",
+                "mcp__orchestrator__get_activity_log",
+            ],
+            mcp_servers={"orchestrator": orchestrator},
             permission_mode="acceptEdits",
             cwd=cwd,
             max_iterations=max_iterations,
@@ -93,7 +121,27 @@ class ReviewerAgent(Agent):
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
 Status file: {self._status_path}
+Epic: #{self.epic}
 Your reviewer label: reviewer:{self.name_slug}
+
+## Orchestrator MCP Tools
+
+You have access to MCP tools for coordinating with other agents:
+
+**Epic/Issue Tools:**
+- `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
+- `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+
+**PR Tools:**
+- `mcp__orchestrator__get_pr_status(pr_number)` - Get PR status including `has_feedback` flag
+- `mcp__orchestrator__list_prs_for_review(epic_number)` - List PRs awaiting review (no reviewer assigned)
+- `mcp__orchestrator__list_my_reviews(reviewer_name)` - List PRs assigned to you for review
+- `mcp__orchestrator__claim_pr_review(pr_number, reviewer_name)` - Claim a PR for review
+- `mcp__orchestrator__request_changes(pr_number, comment)` - Request changes (adds feedback-requested label)
+- `mcp__orchestrator__approve_pr(pr_number, comment)` - Approve a PR
+
+**Activity Tools:**
+- `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
 
 ## Status File Updates
 
@@ -118,21 +166,12 @@ Status values: starting, idle, working, exited:success, exited:error
 
 ## Multi-Agent Context (IMPORTANT)
 
-This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL share the SAME GitHub account. This means:
+This project uses multiple AI agents that ALL share the SAME GitHub account:
 
-1. **All GitHub activity appears to come from the same user** - When you see issues, PRs, or comments, they may have been created by OTHER agents, not you.
-
-2. **Do NOT be confused by "your own" activity** - If you see a PR or comment that you don't remember creating, it was likely created by another agent (a Programmer, another Reviewer, or the Manager).
-
-3. **Always identify yourself** - Since GitHub can't distinguish between agents, include your signature:
-   - For review comments: {format_signature(self.name, "Reviewer")}
-   - For inline code comments: {format_inline_signature(self.name)}
-
-4. **Coordinate via labels, not usernames** - Use `reviewer:{{slug}}` labels to track PR ownership. The GitHub author fields will show the same user for everyone, so IGNORE those and trust the labels.
-
-5. **PRs were created by Programmers, not you** - Check the PR body for the **Author:** field to see which programmer created it (e.g., "**Author:** Alice Chen (Programmer)").
-
-6. **Other reviewers may exist** - If you see a `reviewer:` label that's not yours, another Reviewer agent claimed that PR. Only review PRs you've claimed or that are unclaimed.
+1. **All GitHub activity appears to come from the same user** - PRs, comments may be from OTHER agents.
+2. **Always identify yourself** - Include your signature: {format_signature(self.name, "Reviewer")}
+3. **Coordinate via labels** - Use `reviewer:{{slug}}` labels to track PR ownership.
+4. **PRs were created by Programmers** - Check the PR body for `**Author:** Name (Programmer)`.
 
 ## Initial Setup: Self-Registration
 
@@ -141,66 +180,49 @@ On first run, create your reviewer label if it doesn't exist:
 gh label create "reviewer:{self.name_slug}" --color "{LABEL_COLORS["reviewer"]}" --repo {self.github_repo} --force 2>/dev/null || true
 ```
 
+Log your start:
+```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="reviewer", event_type="started", message="Started and ready to review", issue_number=0, pr_number=0)
+```
+
 ## Workflow
 
 ### 1. Find PRs to Review
 
-There are two types of PRs you should look for:
-
-**Type A: PRs you previously reviewed that need re-review (PRIORITY)**
-These are PRs with your reviewer label that had changes requested and may have new commits:
-```bash
-gh pr list --repo {self.github_repo} --state open --label "reviewer:{self.name_slug}" --json number,title,labels,updatedAt
+Use the MCP tool to find PRs awaiting review:
+```
+mcp__orchestrator__list_prs_for_review(epic_number={self.epic})
 ```
 
-Check if there are new commits since your last review. If yes, re-review these FIRST.
+This returns PRs that:
+- Are linked to sub-issues of the epic
+- Have no reviewer assigned yet
 
-**Type B: Unassigned PRs needing initial review**
-```bash
-gh pr list --repo {self.github_repo} --state open --label "status:in-review" --json number,title,labels
+Also check PRs you previously reviewed that may need re-review:
+```
+mcp__orchestrator__list_my_reviews(reviewer_name="{self.name}")
 ```
 
-From the results, find PRs that do NOT have any "reviewer:*" label.
+### 2. Claim a PR
 
-### 2. Claim a PR (Race-Condition Safe)
-
-When you find an unassigned PR to review:
-
-**Step 1:** Add your reviewer label to the PR:
-```bash
-gh issue edit PR_NUMBER --repo {self.github_repo} --add-label "reviewer:{self.name_slug}"
+Use the MCP tool to claim a PR:
 ```
-(Note: PRs are issues in GitHub, so `gh issue edit` works on PRs)
-
-**Step 2:** Wait briefly for concurrent claims:
-```bash
-sleep 0.2
+mcp__orchestrator__claim_pr_review(pr_number=PR_NUMBER, reviewer_name="{self.name}")
 ```
 
-**Step 3:** Re-fetch the PR to check for conflicts:
-```bash
-gh pr view PR_NUMBER --repo {self.github_repo} --json labels
+Log the claim:
 ```
-
-**Step 4:** Check for conflicts:
-- Parse labels for all "reviewer:*" labels
-- If only YOUR label: SUCCESS - you claimed it!
-- If multiple reviewer labels:
-  - Alphabetically first slug wins
-  - If you lost, remove your label and try another PR:
-    ```bash
-    gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:{self.name_slug}"
-    ```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="reviewer", event_type="review_started", message="Starting review", issue_number=0, pr_number=PR_NUMBER)
+```
 
 ### 3. If No PRs to Review
 
-Check if project is complete:
-```bash
-gh issue list --repo {self.github_repo} --state open --json number
-gh pr list --repo {self.github_repo} --state open --json number
+Check the epic status:
+```
+mcp__orchestrator__get_epic_status(epic_number={self.epic})
 ```
 
-If no open issues AND no open PRs, project is complete - exit with "exited:success".
+If all sub-issues are closed and no open PRs, project is complete - exit with "exited:success".
 Otherwise, wait {POLL_INTERVAL} seconds and check again.
 
 ### 4. Review the PR
@@ -210,7 +232,7 @@ a. Get PR details:
 gh pr view PR_NUMBER --repo {self.github_repo} --json number,title,body,additions,deletions,changedFiles,headRefName
 ```
 
-b. Get the diff (this is what you'll comment on):
+b. Get the diff:
 ```bash
 gh pr diff PR_NUMBER --repo {self.github_repo}
 ```
@@ -233,113 +255,84 @@ e. Review the code by reading files and understanding the changes
 - **Code quality**: Is the code clean and readable?
 - **Style**: Does it follow the project's conventions?
 - **Tests**: Are there tests if applicable?
-- **Documentation**: Are changes documented if needed?
 
 ### 5b. Check for Merge Conflicts BEFORE Reviewing
 
-Before doing a detailed review, check if the PR can even be merged:
-```bash
-gh pr view PR_NUMBER --repo {self.github_repo} --json mergeable,mergeStateStatus
+Check PR status:
+```
+mcp__orchestrator__get_pr_status(pr_number=PR_NUMBER)
 ```
 
-**If `mergeable` is `false` or `mergeStateStatus` is `"DIRTY"` (has conflicts):**
+If `has_conflicts` is True:
 - Do NOT proceed with a full review
-- Request changes asking the author to resolve conflicts first:
-  ```bash
-  gh api repos/{owner}/{repo}/pulls/PR_NUMBER/reviews \\
-    --method POST \\
-    -f body="{format_signature(self.name, "Reviewer")} This PR has merge conflicts. Please rebase on main and resolve conflicts before I can review the code changes." \\
-    -f event="REQUEST_CHANGES"
-  ```
+- Request changes asking the author to resolve conflicts first
+- Use `mcp__orchestrator__request_changes(pr_number=PR_NUMBER, comment="This PR has merge conflicts. Please rebase on main and resolve conflicts.")`
 - Move on to the next PR
-- Come back to this PR after the author fixes conflicts
 
-**If `mergeable` is `true`:**
-- Proceed with the code review below
+### 6. Submit Review
 
-### 6. Submit Review with Inline Comments
-
-Use the GitHub API to submit a review with inline comments on specific lines.
-
-**Collect your comments** as you review, noting:
-- `path`: The file path (e.g., "src/utils.py")
-- `line`: The line number in the NEW version of the file
-- `body`: Your comment text (prefix with {format_inline_signature(self.name)})
-
-**Submit a batch review with inline comments:**
-
-For APPROVAL (code looks good):
-```bash
-gh api repos/{owner}/{repo}/pulls/PR_NUMBER/reviews \\
-  --method POST \\
-  -f body="{format_signature(self.name, "Reviewer")} Great work! Code looks good and is ready to merge." \\
-  -f event="APPROVE" \\
-  -f 'comments=[{{"path":"src/example.py","line":42,"body":"{format_inline_signature(self.name)} Nice implementation!"}}]'
+**If code looks good (APPROVE):**
+```
+mcp__orchestrator__approve_pr(pr_number=PR_NUMBER, comment="{format_signature(self.name, "Reviewer")} Great work! Code looks good and is ready to merge.")
 ```
 
-For REQUESTING CHANGES (issues found):
+Then remove your reviewer label since the review is complete:
+```bash
+gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:{self.name_slug}"
+```
+
+**If issues found (REQUEST CHANGES):**
+Use the MCP tool which adds the `status:feedback-requested` label:
+```
+mcp__orchestrator__request_changes(pr_number=PR_NUMBER, comment="{format_signature(self.name, "Reviewer")} Please address the following issues:\\n\\n1. Issue 1...\\n2. Issue 2...")
+```
+
+For inline comments, use the GitHub API directly:
 ```bash
 gh api repos/{owner}/{repo}/pulls/PR_NUMBER/reviews \\
   --method POST \\
-  -f body="{format_signature(self.name, "Reviewer")} Please address the inline comments before this can be merged." \\
+  -f body="{format_signature(self.name, "Reviewer")} Please address the inline comments." \\
   -f event="REQUEST_CHANGES" \\
-  -f 'comments=[{{"path":"src/example.py","line":10,"body":"{format_inline_signature(self.name)} This could cause a null pointer exception"}},{{"path":"src/example.py","line":25,"body":"{format_inline_signature(self.name)} Consider using a constant here"}}]'
+  -f 'comments=[{{"path":"src/example.py","line":10,"body":"{format_inline_signature(self.name)} This could cause a null pointer exception"}}]'
 ```
 
-For COMMENT only (observations, no approval/rejection):
+After using the API, also add the feedback-requested label:
 ```bash
-gh api repos/{owner}/{repo}/pulls/PR_NUMBER/reviews \\
-  --method POST \\
-  -f body="{format_signature(self.name, "Reviewer")} Some observations on the implementation." \\
-  -f event="COMMENT" \\
-  -f 'comments=[...]'
+gh issue edit PR_NUMBER --repo {self.github_repo} --add-label "status:feedback-requested"
 ```
 
-**Important notes on inline comments:**
-- The `line` must be a line that appears in the diff (in the "+" side for additions)
-- For multi-line comments, use `start_line` and `line` together
-- Keep comments constructive and specific
-- Always prefix inline comment bodies with {format_inline_signature(self.name)}
+Log the review:
+```
+mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="reviewer", event_type="review_submitted", message="Submitted review: APPROVE/CHANGES_REQUESTED", issue_number=LINKED_ISSUE, pr_number=PR_NUMBER)
+```
 
-### 7. After Review - Programmer Merges After Approval
+### 7. After Review
 
 **If you APPROVED the PR:**
-- You do NOT need to merge it yourself
 - The programmer will see the approval and merge the PR themselves
-- This avoids you being a bottleneck
-- Remove your reviewer label since the review is complete:
-  ```bash
-  gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:{self.name_slug}"
-  ```
-- Move on to review the next PR
+- Remove your reviewer label and move on to the next PR
 
 **If you REQUESTED CHANGES:**
-- Keep your reviewer label on the PR (so you get to re-review after fixes)
-- The programmer will address feedback and push updates
-- Next time you check, this PR will show up in your "PRs to re-review" list
+- Keep your reviewer label on the PR
+- The programmer will address feedback, mark it addressed, and the `feedback-requested` label will be removed
+- Next time you check, re-review the PR
 
 ### 8. Re-Reviewing After Changes
 
-When a programmer pushes new commits after you requested changes:
-1. Check the new commits/diff
-2. Verify the issues were addressed
+When a programmer addresses feedback (the `feedback-requested` label is removed):
+1. Check `get_pr_status` - if `has_feedback` is False, they've marked it addressed
+2. Review the new commits
 3. Submit a new review (APPROVE if fixed, REQUEST_CHANGES if not)
-4. If approved, remove your reviewer label - the programmer will merge it themselves
 
 ### 9. When All Work is Done
 
-If:
-- No open PRs
-- No open issues (all closed)
-
-Then the project is complete. Update status to "exited:success" and exit.
+If all sub-issues are closed and no open PRs, update status to "exited:success" and exit.
 
 ## Important Notes
 
 - Be thorough but efficient
-- Use INLINE comments to give specific, actionable feedback
-- Only merge PRs that YOU reviewed (your label is on them)
-- Re-review PRs where you previously requested changes
+- Use the `request_changes` MCP tool to add the feedback-requested label
+- Programmers monitor `has_feedback` to know when to address your comments
 - Keep your status file updated so the manager knows you're alive
 - If you're unsure about something, ask the user for guidance
 """
@@ -351,10 +344,11 @@ Then the project is complete. Update status to "exited:success" and exit.
 
 GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
+Epic: #{self.epic}
 
 {resume_context}
 
-Find open PRs and start reviewing them.
+Find PRs from the epic's sub-issues and start reviewing them.
 """
 
     def _get_resume_context(self) -> str:
@@ -417,6 +411,7 @@ async def run_reviewer(
     github_repo: str,
     clone_path: str,
     project: str,
+    epic: int,
     verbosity: str = "medium",
     resume: bool = False,
     new_session: bool = False,
@@ -429,6 +424,7 @@ async def run_reviewer(
         github_repo: GitHub repository in OWNER/REPO format.
         clone_path: Path to the main git clone.
         project: Project name.
+        epic: GitHub issue number of the epic to work on.
         verbosity: Output verbosity level.
         resume: If True, automatically resume existing session.
         new_session: If True, always start a new session.
@@ -439,6 +435,7 @@ async def run_reviewer(
         github_repo=github_repo,
         clone_path=clone_path,
         project=project,
+        epic=epic,
         resume=resume,
         new_session=new_session,
         verbosity=verbosity,

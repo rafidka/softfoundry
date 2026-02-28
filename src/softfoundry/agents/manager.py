@@ -6,6 +6,7 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS
 from softfoundry.utils.loop import Agent, AgentConfig
 
@@ -50,19 +51,41 @@ class ManagerAgent(Agent):
         """
         # Store agent-specific state
         self.github_repo = github_repo
-        self.clone_path = clone_path
+        self.clone_path = str(Path(clone_path).resolve())  # Always use absolute path
         self.project = project
         self.epic = epic
 
-        # Determine working directory
-        cwd = str(Path(clone_path).resolve()) if Path(clone_path).exists() else None
+        # Determine working directory (only set if path exists)
+        cwd = self.clone_path if Path(self.clone_path).exists() else None
+
+        # Create MCP orchestrator server
+        orchestrator = create_orchestrator_server(
+            name="orchestrator",
+            github_repo=github_repo,
+        )
 
         # Build config and delegate to parent
         config = AgentConfig(
             namespace=project,
             agent_type=AGENT_TYPE,
             agent_name="manager",
-            allowed_tools=["Read", "Edit", "Glob", "Write", "Bash", "Grep"],
+            allowed_tools=[
+                "Read",
+                "Edit",
+                "Glob",
+                "Write",
+                "Bash",
+                "Grep",
+                # Epic/Issue tools
+                "mcp__orchestrator__get_epic_status",
+                "mcp__orchestrator__get_sub_issue",
+                "mcp__orchestrator__create_sub_issue",
+                "mcp__orchestrator__close_epic",
+                # Activity tools
+                "mcp__orchestrator__log_activity",
+                "mcp__orchestrator__get_activity_log",
+            ],
+            mcp_servers={"orchestrator": orchestrator},
             permission_mode="acceptEdits",
             cwd=cwd,
             max_iterations=max_iterations,
@@ -97,6 +120,20 @@ Your responsibilities:
 3. Guide the user to start programmer/reviewer agents (they self-assign tasks)
 4. Monitor project progress and release stale tasks
 5. Determine when the epic is complete (all sub-issues closed)
+
+## Orchestrator MCP Tools
+
+You have access to MCP tools for coordinating with other agents:
+
+**Epic/Issue Tools:**
+- `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
+- `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+- `mcp__orchestrator__create_sub_issue(epic_number, title, body, priority)` - Create and link a sub-issue
+- `mcp__orchestrator__close_epic(epic_number)` - Close the epic when complete
+
+**Activity Tools:**
+- `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
+- `mcp__orchestrator__get_activity_log(epic_number, limit)` - Get recent activity
 
 ## Key Concepts
 
@@ -233,41 +270,21 @@ Ask the user: "Are you happy with this plan, or do you have any suggestions?"
 
 ### Step 1.7: Create Sub-Issues
 
-For each task in the approved plan:
+For each task in the approved plan, use the MCP tool:
 
-1. Create the issue:
-   ```bash
-   gh issue create --repo {self.github_repo} \\
-       --title "Task title" \\
-       --body "Description of what needs to be done" \\
-       --label "status:pending,priority:medium"
-   ```
-   Note the issue number from the output.
+```
+mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium")
+```
 
-2. Get the new issue's node ID:
-   ```bash
-   gh api graphql -f query='
-     query GetIssueNodeId($owner: String!, $repo: String!, $number: Int!) {{
-       repository(owner: $owner, name: $repo) {{
-         issue(number: $number) {{
-           id
-         }}
-       }}
-     }}
-   ' -f owner='{self.github_repo.split("/")[0]}' -f repo='{self.github_repo.split("/")[1]}' -F number=SUB_ISSUE_NUMBER
-   ```
+This tool:
+1. Creates the issue with `status:pending` and `priority:` labels
+2. Gets the node IDs automatically
+3. Links it as a sub-issue of the epic
 
-3. Link it as a sub-issue of the epic:
-   ```bash
-   gh api graphql -f query='
-     mutation AddSubIssue($parentId: ID!, $subIssueId: ID!) {{
-       addSubIssue(input: {{issueId: $parentId, subIssueId: $subIssueId}}) {{
-         issue {{ number title }}
-         subIssue {{ number title }}
-       }}
-     }}
-   ' -f parentId='EPIC_NODE_ID' -f subIssueId='SUB_ISSUE_NODE_ID'
-   ```
+After creating all sub-issues, log the activity:
+```
+mcp__orchestrator__log_activity(epic_number=EPIC_NUMBER, agent_name="Manager", agent_type="manager", event_type="progress", message="Created N sub-issues for the epic", issue_number=0, pr_number=0)
+```
 
 NOTE: Do NOT assign tasks to programmers. Programmer agents will self-assign tasks by claiming them.
 
@@ -280,26 +297,31 @@ Each programmer needs a unique name. Each reviewer needs a unique name.
 
 **Example Programmer Commands (user can run multiple with different names):**
 ```bash
-sf programmer --name "Alice Chen" \\
+uv run sf programmer --name "Alice Chen" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
-    --project {self.project}
+    --project {self.project} \\
+    --epic EPIC_NUMBER
 ```
 
 ```bash
-sf programmer --name "Bob Smith" \\
+uv run sf programmer --name "Bob Smith" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
-    --project {self.project}
+    --project {self.project} \\
+    --epic EPIC_NUMBER
 ```
 
 **Example Reviewer Commands (user can run multiple with different names):**
 ```bash
-sf reviewer --name "Rachel Review" \\
+uv run sf reviewer --name "Rachel Review" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
-    --project {self.project}
+    --project {self.project} \\
+    --epic EPIC_NUMBER
 ```
+
+**IMPORTANT:** Replace `EPIC_NUMBER` with the actual epic issue number (e.g., `--epic 1`).
 
 Explain that:
 - Programmers will automatically find and claim unassigned sub-tasks from the epic
@@ -315,24 +337,15 @@ Once agents are running, periodically:
 
 ### 1. Check Epic Progress
 
-List the sub-issues of the current epic:
-```bash
-gh api graphql -f query='
-  query ListSubIssues($owner: String!, $repo: String!, $number: Int!) {{
-    repository(owner: $owner, name: $repo) {{
-      issue(number: $number) {{
-        subIssues(first: 100) {{
-          nodes {{
-            number
-            title
-            state
-          }}
-        }}
-      }}
-    }}
-  }}
-' -f owner='{self.github_repo.split("/")[0]}' -f repo='{self.github_repo.split("/")[1]}' -F number=EPIC_NUMBER
+Use the MCP tool to get epic status with all sub-issues:
 ```
+mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)
+```
+
+This returns:
+- Epic number, title, state
+- List of all sub-issues with their status, assignee, priority
+- Total and completed sub-issue counts
 
 ### 2. Check for Stale Programmer Agents
 
@@ -391,11 +404,26 @@ Summarize:
 
 ### 6. Check for Epic Completion
 
-If all sub-issues of the epic are closed and all related PRs are merged:
-- Close the epic issue
-- Update your status to "exited:success"
-- Congratulate the user
-- Say "PROJECT COMPLETE" clearly so the system knows to exit
+Check epic status:
+```
+mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)
+```
+
+If `completed_sub_issues == total_sub_issues` and all PRs are merged:
+
+1. Close the epic:
+   ```
+   mcp__orchestrator__close_epic(epic_number=EPIC_NUMBER)
+   ```
+
+2. Log completion:
+   ```
+   mcp__orchestrator__log_activity(epic_number=EPIC_NUMBER, agent_name="Manager", agent_type="manager", event_type="completed", message="All tasks completed, epic closed", issue_number=0, pr_number=0)
+   ```
+
+3. Update your status to "exited:success"
+4. Congratulate the user
+5. Say "PROJECT COMPLETE" clearly so the system knows to exit
 
 ## Communication
 
