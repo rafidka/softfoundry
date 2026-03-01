@@ -10,11 +10,11 @@ The module is organized as:
 - Server factory (create_orchestrator_server)
 """
 
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
+from pydantic import BaseModel
 
 from softfoundry.mcp.github_client import GitHubClient, GitHubClientError
 
@@ -41,10 +41,10 @@ def _json_success(data: Any) -> dict[str, Any]:
     """Create a success response with JSON data."""
     import json
 
-    if hasattr(data, "__dataclass_fields__"):
-        data = asdict(data)
-    elif isinstance(data, list) and data and hasattr(data[0], "__dataclass_fields__"):
-        data = [asdict(item) for item in data]
+    if isinstance(data, BaseModel):
+        data = data.model_dump()
+    elif isinstance(data, list) and data and isinstance(data[0], BaseModel):
+        data = [item.model_dump() for item in data]
     return {
         "content": [{"type": "text", "text": json.dumps(data, indent=2, default=str)}]
     }

@@ -6,7 +6,6 @@ across different project directories and allow easy backup/cleanup.
 
 import json
 import re
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -110,7 +109,7 @@ class SessionManager:
         self.sessions_path.mkdir(parents=True, exist_ok=True)
 
         with open(session_path, "w") as f:
-            json.dump(asdict(session_info), f, indent=2)
+            json.dump(session_info.model_dump(), f, indent=2)
 
     def delete_session(self, agent_type: str, agent_name: str) -> bool:
         """Delete a saved session.

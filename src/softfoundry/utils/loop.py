@@ -12,7 +12,6 @@ import asyncio
 import sys
 import time
 from abc import ABC, abstractmethod
-from dataclasses import field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,7 +22,7 @@ from claude_agent_sdk import (
     ResultMessage,
     TextBlock,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from softfoundry.utils.env import get_claude_code_token
 from softfoundry.utils.interactive import InteractiveInput
@@ -87,14 +86,14 @@ class AgentConfig(BaseModel):
     agent_name: str = "default"
 
     # Claude SDK options
-    allowed_tools: list[str] = field(
+    allowed_tools: list[str] = Field(
         default_factory=lambda: ["Read", "Edit", "Glob", "Write", "Bash", "Grep"]
     )
     permission_mode: Literal["default", "acceptEdits", "plan", "bypassPermissions"] = (
         "acceptEdits"
     )
     cwd: str | Path | None = None
-    mcp_servers: dict[str, Any] = field(default_factory=dict)
+    mcp_servers: dict[str, Any] = Field(default_factory=dict)
 
     # Loop behavior
     max_iterations: int = 100
