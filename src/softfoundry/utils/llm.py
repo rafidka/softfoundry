@@ -35,7 +35,9 @@ def needs_user_input(text: str) -> bool:
 
     client = anthropic.Anthropic(api_key=get_anthropic_api_key())
 
-    prompt = f"""Analyze the following text and determine if it ends with a question or request that requires the user to provide information, make a decision, or give input.
+    prompt = f"""
+Analyze the following text and determine if it ends with a question or request that
+requires the user to provide information, make a decision, or give input.
 
 Examples of text that NEEDS user input:
 - "What programming language should I use?"
@@ -54,7 +56,8 @@ Text to analyze:
 {text}
 </text>
 
-Does this text require the user to provide input or answer a question? Respond with only "YES" or "NO"."""
+Does this text require the user to provide input or answer a question? Respond with only "YES" or "NO".
+""".strip()
 
     response = client.messages.create(
         model=CLASSIFICATION_MODEL,
@@ -70,54 +73,3 @@ Does this text require the user to provide input or answer a question? Respond w
             break
 
     return response_text == "YES"
-
-
-def extract_question(text: str) -> str | None:
-    """Extract the specific question being asked from the text.
-
-    Args:
-        text: The text containing a question.
-
-    Returns:
-        The extracted question, or None if no clear question found.
-    """
-    if not text or not text.strip():
-        return None
-
-    # Truncate very long text
-    max_chars = 4000
-    if len(text) > max_chars:
-        text = "..." + text[-max_chars:]
-
-    client = anthropic.Anthropic(api_key=get_anthropic_api_key())
-
-    prompt = f"""Extract the main question or request from the following text that requires user input.
-
-Return ONLY the question/request itself, without any additional text.
-If there are multiple questions, return the most important one that the user needs to answer to proceed.
-If there's no clear question, respond with "NONE".
-
-Text:
-<text>
-{text}
-</text>
-
-Question:"""
-
-    response = client.messages.create(
-        model=CLASSIFICATION_MODEL,
-        max_tokens=200,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    # Extract the response text
-    response_text = ""
-    for block in response.content:
-        if block.type == "text":
-            response_text = block.text.strip()
-            break
-
-    if response_text.upper() == "NONE":
-        return None
-
-    return response_text

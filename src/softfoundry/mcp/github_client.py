@@ -154,6 +154,7 @@ class GitHubClient:
             )
         return response.json()
 
+    # Not used for now, but keeping it in case we need it later.
     async def _rest_put(self, path: str, json: dict[str, Any]) -> Any:
         """Execute a REST PUT request."""
         response = await self.client.put(path, json=json)
@@ -163,6 +164,7 @@ class GitHubClient:
             )
         return response.json()
 
+    # Not used for now, but keeping it in case we need it later.
     async def _rest_delete(self, path: str) -> None:
         """Execute a REST DELETE request."""
         response = await self.client.delete(path)
@@ -381,6 +383,7 @@ class GitHubClient:
     # Label Methods
     # -------------------------------------------------------------------------
 
+    # TODO Not used. Should we remove?
     async def create_label(
         self, name: str, color: str, description: str = ""
     ) -> dict[str, Any]:
