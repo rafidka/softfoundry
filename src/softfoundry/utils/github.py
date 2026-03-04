@@ -16,6 +16,7 @@ LABEL_COLORS = {
     "status_in_progress": "0e8a16",  # Green - being worked on
     "status_in_review": "6f42c1",  # Purple - PR awaiting review
     "status_feedback_requested": "d73a4a",  # Red - reviewer requested changes
+    "status_approved": "0e8a16",  # Green - reviewer approved
     # Priority labels
     "priority_high": "d73a4a",  # Red
     "priority_medium": "fbca04",  # Yellow

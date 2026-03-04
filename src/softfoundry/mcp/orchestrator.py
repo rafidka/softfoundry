@@ -83,10 +83,19 @@ async def impl_get_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_list_available_sub_issues(args: dict[str, Any]) -> dict[str, Any]:
-    """List unassigned pending sub-issues from an epic."""
+    """List unassigned pending sub-issues from an epic.
+
+    Automatically filters out tasks whose dependencies are not yet resolved
+    (i.e., all issues in depends_on must be closed before a task is available).
+    """
     try:
         client = _get_client()
         epic_status = await client.get_epic_status(args["epic_number"])
+
+        # Build set of closed sub-issue numbers for dependency resolution
+        closed_issues = {
+            si.number for si in epic_status.sub_issues if si.state == "closed"
+        }
 
         # Filter to unassigned pending issues
         available = [
@@ -95,6 +104,11 @@ async def impl_list_available_sub_issues(args: dict[str, Any]) -> dict[str, Any]
             if si.state == "open"
             and si.assignee is None
             and si.status in (None, "pending")
+        ]
+
+        # Filter out tasks with unresolved dependencies
+        available = [
+            si for si in available if all(dep in closed_issues for dep in si.depends_on)
         ]
 
         # Filter by priority if specified
@@ -125,19 +139,49 @@ async def impl_list_my_sub_issues(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_claim_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
-    """Claim an unassigned sub-issue by adding assignee label."""
+    """Claim an unassigned sub-issue by adding assignee label.
+
+    Validates that all dependencies are resolved (closed) before allowing
+    the claim. This prevents agents from working on tasks whose
+    prerequisites are not yet complete.
+    """
     try:
         client = _get_client()
 
-        # First verify the sub-issue is part of the epic and unassigned
-        sub_issue = await client.get_sub_issue_status(
-            args["epic_number"], args["sub_issue_number"]
-        )
+        # Get epic status to check dependencies
+        epic_status = await client.get_epic_status(args["epic_number"])
+
+        # Find the sub-issue in the epic
+        sub_issue = None
+        for si in epic_status.sub_issues:
+            if si.number == args["sub_issue_number"]:
+                sub_issue = si
+                break
+
+        if sub_issue is None:
+            return _error(
+                f"Sub-issue #{args['sub_issue_number']} is not part of epic #{args['epic_number']}"
+            )
 
         if sub_issue.assignee is not None:
             return _error(
                 f"Sub-issue #{args['sub_issue_number']} is already assigned to {sub_issue.assignee}"
             )
+
+        # Check dependencies — all must be closed
+        if sub_issue.depends_on:
+            closed_issues = {
+                si.number for si in epic_status.sub_issues if si.state == "closed"
+            }
+            unresolved = [
+                dep for dep in sub_issue.depends_on if dep not in closed_issues
+            ]
+            if unresolved:
+                dep_str = ", ".join(f"#{d}" for d in unresolved)
+                return _error(
+                    f"Sub-issue #{args['sub_issue_number']} is blocked by unresolved dependencies: {dep_str}. "
+                    f"These tasks must be completed before this one can be claimed."
+                )
 
         # Convert agent name to slug
         agent_slug = args["agent_name"].lower().replace(" ", "-")
@@ -196,9 +240,25 @@ async def impl_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
         if priority not in ("high", "medium", "low"):
             priority = "medium"
 
+        # Parse depends_on from comma-separated string (e.g. "3,5,7" or "")
+        depends_on_str = args.get("depends_on", "")
+        depends_on: list[int] = []
+        if depends_on_str:
+            depends_on = [
+                int(d.strip().lstrip("#"))
+                for d in depends_on_str.split(",")
+                if d.strip()
+            ]
+
+        # Build the issue body, appending dependency metadata if present
+        body = args["body"]
+        if depends_on:
+            deps_ref = ", ".join(f"#{d}" for d in depends_on)
+            body = f"{body}\n\nDependencies: {deps_ref}"
+
         # Create the issue
         labels = ["status:pending", f"priority:{priority}"]
-        issue = await client.create_issue(args["title"], args["body"], labels)
+        issue = await client.create_issue(args["title"], body, labels)
         issue_number = issue["number"]
 
         # Get node IDs
@@ -208,14 +268,16 @@ async def impl_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
         # Link as sub-issue
         await client.add_sub_issue(epic_node_id, sub_issue_node_id)
 
-        return _json_success(
-            {
-                "number": issue_number,
-                "title": args["title"],
-                "url": issue["html_url"],
-                "message": f"Created sub-issue #{issue_number} and linked to epic #{args['epic_number']}",
-            }
-        )
+        result: dict[str, Any] = {
+            "number": issue_number,
+            "title": args["title"],
+            "url": issue["html_url"],
+            "message": f"Created sub-issue #{issue_number} and linked to epic #{args['epic_number']}",
+        }
+        if depends_on:
+            result["depends_on"] = depends_on
+
+        return _json_success(result)
     except GitHubClientError as e:
         return _error(str(e))
 
@@ -261,7 +323,12 @@ async def impl_list_my_prs(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_list_my_reviews(args: dict[str, Any]) -> dict[str, Any]:
-    """List pull requests assigned to a specific reviewer."""
+    """List pull requests assigned to a specific reviewer that need action.
+
+    Excludes PRs that have already been approved (is_approved=True
+    with no pending feedback), since those are just waiting for the
+    programmer to merge.
+    """
     try:
         client = _get_client()
         prs = await client.list_prs(state="open")
@@ -273,6 +340,10 @@ async def impl_list_my_reviews(args: dict[str, Any]) -> dict[str, Any]:
             pr_status = await client.get_pr_status(pr["number"])
             # Check if reviewer label matches
             if pr_status.reviewer and pr_status.reviewer.lower() == reviewer_slug:
+                # Skip PRs already approved with no pending feedback —
+                # these are just waiting for the programmer to merge
+                if pr_status.is_approved and not pr_status.has_feedback:
+                    continue
                 my_reviews.append(pr_status)
 
         return _json_success(my_reviews)
@@ -342,22 +413,32 @@ async def impl_claim_pr_review(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_request_changes(args: dict[str, Any]) -> dict[str, Any]:
-    """Request changes on a PR."""
+    """Request changes on a PR.
+
+    Adds the `status:feedback-requested` label and removes `status:approved`
+    if present (in case of a re-review cycle where the reviewer previously
+    approved but now requests changes).
+    """
     try:
         client = _get_client()
 
-        # Add feedback-requested label
+        # Add feedback-requested label, remove approved if present
         await client.update_issue_labels(
             args["pr_number"],
             add_labels=["status:feedback-requested"],
+            remove_labels=["status:approved"],
         )
 
-        # Create a review with REQUEST_CHANGES
-        await client.create_pr_review(
-            args["pr_number"],
-            event="REQUEST_CHANGES",
-            body=args["comment"],
-        )
+        # Attempt to create a review with REQUEST_CHANGES (may not persist for self-reviews)
+        try:
+            await client.create_pr_review(
+                args["pr_number"],
+                event="REQUEST_CHANGES",
+                body=args["comment"],
+            )
+        except GitHubClientError:
+            # Self-reviews may fail — the label is the source of truth
+            pass
 
         return _success(
             f"Requested changes on PR #{args['pr_number']} and added feedback-requested label"
@@ -389,17 +470,33 @@ async def impl_mark_feedback_addressed(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
-    """Approve a pull request."""
+    """Approve a pull request.
+
+    Adds the `status:approved` label and removes `status:feedback-requested`
+    if present. Also attempts to create a GitHub APPROVE review (may be
+    silently ignored for self-reviews since all agents share one account).
+    """
     try:
         client = _get_client()
 
-        # Create an approval review
-        comment = args.get("comment", "LGTM!")
-        await client.create_pr_review(
+        # Add approved label, remove feedback-requested if present
+        await client.update_issue_labels(
             args["pr_number"],
-            event="APPROVE",
-            body=comment,
+            add_labels=["status:approved"],
+            remove_labels=["status:feedback-requested"],
         )
+
+        # Attempt to create an approval review (may not persist for self-reviews)
+        comment = args.get("comment", "LGTM!")
+        try:
+            await client.create_pr_review(
+                args["pr_number"],
+                event="APPROVE",
+                body=comment,
+            )
+        except GitHubClientError:
+            # Self-reviews may fail — the label is the source of truth
+            pass
 
         return _success(f"Approved PR #{args['pr_number']}")
     except GitHubClientError as e:
@@ -533,8 +630,8 @@ async def tool_update_sub_issue_status(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "create_sub_issue",
-    "Create a new sub-issue and link it to the epic",
-    {"epic_number": int, "title": str, "body": str, "priority": str},
+    "Create a new sub-issue and link it to the epic. Use depends_on to specify issue numbers this task depends on (comma-separated, e.g. '3,5'). Leave empty for no dependencies.",
+    {"epic_number": int, "title": str, "body": str, "priority": str, "depends_on": str},
 )
 async def tool_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_create_sub_issue(args)

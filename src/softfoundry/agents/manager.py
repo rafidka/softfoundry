@@ -197,6 +197,8 @@ gh label create "type:epic" --color "{LABEL_COLORS["type_epic"]}" --repo {self.g
 gh label create "status:pending" --color "{LABEL_COLORS["status_pending"]}" --repo {self.github_repo} --force
 gh label create "status:in-progress" --color "{LABEL_COLORS["status_in_progress"]}" --repo {self.github_repo} --force
 gh label create "status:in-review" --color "{LABEL_COLORS["status_in_review"]}" --repo {self.github_repo} --force
+gh label create "status:feedback-requested" --color "{LABEL_COLORS["status_feedback_requested"]}" --repo {self.github_repo} --force
+gh label create "status:approved" --color "{LABEL_COLORS["status_approved"]}" --repo {self.github_repo} --force
 gh label create "priority:high" --color "{LABEL_COLORS["priority_high"]}" --repo {self.github_repo} --force
 gh label create "priority:medium" --color "{LABEL_COLORS["priority_medium"]}" --repo {self.github_repo} --force
 gh label create "priority:low" --color "{LABEL_COLORS["priority_low"]}" --repo {self.github_repo} --force
@@ -262,6 +264,15 @@ Present the task plan as a numbered list with:
 - Task title
 - Brief description (1-2 sentences)
 - Proposed priority (high/medium/low)
+- Dependencies (which other tasks in the plan must be completed first)
+
+**Dependency Planning Guidelines:**
+- Identify foundational/infrastructure tasks that can be worked on independently (no dependencies)
+- Identify which tasks depend on other tasks being completed first
+- A task should list as dependencies ONLY the tasks it directly depends on (not transitive dependencies)
+- Multiple tasks CAN share the same dependency (e.g., tasks 3 and 4 can both depend on task 1)
+- Tasks with no dependencies can be worked on in parallel by different programmers
+- Example: "Task 3: Add user profile page (depends on: Task 1: Set up database schema)"
 
 Ask the user: "Are you happy with this plan, or do you have any suggestions?"
 - WAIT for user response before proceeding
@@ -270,16 +281,31 @@ Ask the user: "Are you happy with this plan, or do you have any suggestions?"
 
 ### Step 1.7: Create Sub-Issues
 
+**IMPORTANT: Create tasks in dependency order** — create independent tasks (no dependencies) first,
+then create dependent tasks referencing the issue numbers of their prerequisites.
+This is necessary because you need the issue numbers of prerequisite tasks to specify dependencies.
+
 For each task in the approved plan, use the MCP tool:
 
 ```
-mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium")
+mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="")
+```
+
+For tasks with dependencies, pass the issue numbers of prerequisite tasks (comma-separated):
+```
+mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="3,5")
 ```
 
 This tool:
 1. Creates the issue with `status:pending` and `priority:` labels
-2. Gets the node IDs automatically
-3. Links it as a sub-issue of the epic
+2. Appends a `Dependencies: #3, #5` line to the issue body (if dependencies are specified)
+3. Gets the node IDs automatically
+4. Links it as a sub-issue of the epic
+
+The dependency system ensures that:
+- Programmers cannot claim tasks until all their dependencies are closed
+- `list_available_sub_issues` automatically filters out blocked tasks
+- This prevents agents from working on overlapping or out-of-order tasks
 
 After creating all sub-issues, log the activity:
 ```

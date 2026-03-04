@@ -209,6 +209,7 @@ class GitHubClient:
                             number
                             title
                             state
+                            body
                             labels(first: 10) {
                                 nodes {
                                     name
@@ -404,24 +405,28 @@ class GitHubClient:
 
     def _parse_labels(
         self, labels: list[dict[str, Any]]
-    ) -> tuple[str | None, str | None, str | None, bool]:
-        """Parse labels to extract status, assignee, priority, and feedback flag.
+    ) -> tuple[str | None, str | None, str | None, bool, bool]:
+        """Parse labels to extract status, assignee, priority, and review flags.
 
         Returns:
-            Tuple of (status, assignee, priority, has_feedback)
+            Tuple of (status, assignee, priority, has_feedback, is_approved)
         """
         status = None
         assignee = None
         priority = None
         has_feedback = False
+        is_approved = False
 
         for label in labels:
             name = label.get("name", "")
             if name.startswith("status:"):
-                status = name.split(":", 1)[1]
-                if status == "feedback-requested":
+                status_value = name.split(":", 1)[1]
+                if status_value == "feedback-requested":
                     has_feedback = True
-                    status = None  # Don't set status to feedback-requested
+                elif status_value == "approved":
+                    is_approved = True
+                else:
+                    status = status_value
             elif name.startswith("assignee:"):
                 assignee = name.split(":", 1)[1]
             elif name.startswith("priority:"):
@@ -430,7 +435,7 @@ class GitHubClient:
                 # For PRs, we handle reviewer separately
                 pass
 
-        return status, assignee, priority, has_feedback
+        return status, assignee, priority, has_feedback, is_approved
 
     def _parse_reviewer_label(self, labels: list[dict[str, Any]]) -> str | None:
         """Parse labels to extract reviewer."""
@@ -448,6 +453,22 @@ class GitHubClient:
         if match:
             return int(match.group(1))
         return None
+
+    def _parse_dependencies(self, body: str | None) -> list[int]:
+        """Parse dependency issue numbers from an issue body.
+
+        Looks for a line like: Dependencies: #3, #5, #7
+
+        Returns:
+            List of issue numbers this issue depends on.
+        """
+        if not body:
+            return []
+        match = re.search(r"^Dependencies:\s*(.+)$", body, re.MULTILINE)
+        if not match:
+            return []
+        deps_str = match.group(1)
+        return [int(m.group(1)) for m in re.finditer(r"#(\d+)", deps_str)]
 
     async def get_epic_status(self, epic_number: int) -> EpicStatus:
         """Get the status of an epic with all its sub-issues.
@@ -469,7 +490,8 @@ class GitHubClient:
         completed = 0
         for si in sub_issues_data:
             labels = si.get("labels", {}).get("nodes", [])
-            status, assignee, priority, _ = self._parse_labels(labels)
+            status, assignee, priority, _, _ = self._parse_labels(labels)
+            depends_on = self._parse_dependencies(si.get("body"))
 
             # Check if there's a linked PR (we'd need to search PRs, skip for now)
             linked_pr = None
@@ -482,6 +504,7 @@ class GitHubClient:
                 assignee=assignee,
                 priority=priority,
                 linked_pr=linked_pr,
+                depends_on=depends_on,
             )
             sub_issues.append(sub_issue)
 
@@ -519,7 +542,8 @@ class GitHubClient:
         for si in sub_issues:
             if si["number"] == sub_issue_number:
                 labels = si.get("labels", {}).get("nodes", [])
-                status, assignee, priority, _ = self._parse_labels(labels)
+                status, assignee, priority, _, _ = self._parse_labels(labels)
+                depends_on = self._parse_dependencies(si.get("body"))
 
                 return SubIssueStatus(
                     number=si["number"],
@@ -529,6 +553,7 @@ class GitHubClient:
                     assignee=assignee,
                     priority=priority,
                     linked_pr=None,
+                    depends_on=depends_on,
                 )
 
         raise GitHubClientError(
@@ -546,22 +571,11 @@ class GitHubClient:
         """
         pr = await self.get_pr(pr_number)
         labels = pr.get("labels", [])
-        reviews = await self.get_pr_reviews(pr_number)
 
-        # Parse labels
-        _, assignee, _, has_feedback = self._parse_labels(labels)
+        # Parse labels — approval and feedback are label-driven because
+        # GitHub does not support self-reviews (all agents share one account)
+        _, assignee, _, has_feedback, is_approved = self._parse_labels(labels)
         reviewer = self._parse_reviewer_label(labels)
-
-        # Determine review state from latest review
-        review_state = None
-        if reviews:
-            # Get the latest non-COMMENTED review
-            for review in reversed(reviews):
-                if review["state"] in ("APPROVED", "CHANGES_REQUESTED"):
-                    review_state = review["state"]
-                    break
-            if review_state is None and reviews:
-                review_state = reviews[-1]["state"]
 
         # Check for merge conflicts
         mergeable = pr.get("mergeable", True)
@@ -577,10 +591,10 @@ class GitHubClient:
             assignee=assignee,
             reviewer=reviewer,
             has_feedback=has_feedback,
+            is_approved=is_approved,
             mergeable=mergeable if mergeable is not None else True,
             has_conflicts=has_conflicts,
             linked_issue=linked_issue,
-            review_state=review_state,
             head_branch=pr["head"]["ref"],
             base_branch=pr["base"]["ref"],
         )

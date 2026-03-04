@@ -276,10 +276,7 @@ If `has_conflicts` is True:
 mcp__orchestrator__approve_pr(pr_number=PR_NUMBER, comment="{format_signature(self.name, "Reviewer")} Great work! Code looks good and is ready to merge.")
 ```
 
-Then remove your reviewer label since the review is complete:
-```bash
-gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:{self.name_slug}"
-```
+Do NOT remove your reviewer label. Keep it on the PR so that you remain the assigned reviewer until the programmer merges it. The label disappears naturally when the PR is merged.
 
 **If issues found (REQUEST CHANGES):**
 Use the MCP tool which adds the `status:feedback-requested` label:
@@ -310,7 +307,8 @@ mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}
 
 **If you APPROVED the PR:**
 - The programmer will see the approval and merge the PR themselves
-- Remove your reviewer label and move on to the next PR
+- Keep your reviewer label on the PR — do NOT remove it. This ensures you remain the assigned reviewer until the PR is merged. The `list_my_reviews` tool will automatically exclude approved PRs, so you won't see it again unless new feedback is requested.
+- Move on to the next PR
 
 **If you REQUESTED CHANGES:**
 - Keep your reviewer label on the PR

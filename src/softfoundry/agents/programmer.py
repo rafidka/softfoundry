@@ -215,6 +215,9 @@ mcp__orchestrator__list_available_sub_issues(epic_number={self.epic}, priority="
 ```
 
 This returns sub-issues from the epic that are unassigned and have status `pending`.
+It automatically filters out tasks whose dependencies are not yet resolved — you will only see tasks that are ready to be worked on.
+
+If no tasks are available, it may be because all remaining tasks are blocked by unresolved dependencies (other tasks that haven't been completed yet). Wait for those tasks to be completed and check again.
 
 ### 2. Claim the Task
 
@@ -225,6 +228,7 @@ mcp__orchestrator__claim_sub_issue(epic_number={self.epic}, sub_issue_number=ISS
 ```
 
 This atomically adds your assignee label and sets status to `in-progress`.
+It also validates that all task dependencies are resolved — if any dependencies are still open, the claim will be rejected with an error message listing the blocking issues.
 
 Log the claim:
 ```
@@ -329,7 +333,7 @@ mcp__orchestrator__get_pr_status(pr_number=PR_NUMBER)
 This returns a JSON object with:
 - `state`: "open", "closed", or "merged"
 - `has_feedback`: True if `status:feedback-requested` label is present
-- `review_state`: "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "PENDING", or null
+- `is_approved`: True if `status:approved` label is present
 
 **If PR state is "merged":**
 - Clean up and find next task (go to section 9, then section 10)
@@ -337,8 +341,11 @@ This returns a JSON object with:
 **If `has_feedback` is True:**
 1. Read the review comments:
    ```bash
-   gh api repos/{self.github_repo}/pulls/PR_NUMBER/reviews --jq '.[] | select(.state == "CHANGES_REQUESTED") | .body'
    gh api repos/{self.github_repo}/pulls/PR_NUMBER/comments --jq '.[] | "File: " + .path + " Line: " + (.line|tostring) + " Comment: " + .body'
+   ```
+   Also check for review body comments:
+   ```bash
+   gh pr view PR_NUMBER --repo {self.github_repo} --json reviews --jq '.reviews[] | select(.state == "CHANGES_REQUESTED") | .body'
    ```
 
 2. Address each piece of feedback by making the necessary code changes
@@ -362,7 +369,7 @@ This returns a JSON object with:
 
 6. Update status to "addressing_feedback" while working, then back to "waiting_review"
 
-**If `review_state` is "APPROVED" and `has_feedback` is False:**
+**If `is_approved` is True and `has_feedback` is False:**
 - Great! Your PR has been approved. Now YOU should merge it:
   ```bash
   gh pr merge PR_NUMBER --repo {self.github_repo} --squash --delete-branch
@@ -373,7 +380,7 @@ This returns a JSON object with:
 **If `has_conflicts` is True:**
 - Go to Section 8 to resolve conflicts immediately
 
-**If no reviews yet (`review_state` is null or "PENDING"):**
+**If not yet reviewed (`is_approved` is False and `has_feedback` is False):**
 - Wait 30 seconds and check again
 
 ### 8. Handle Conflicts

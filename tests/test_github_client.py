@@ -334,12 +334,15 @@ class TestLabelParsing:
         client = GitHubClient("owner", "repo")
         labels = [{"name": "status:in-progress"}, {"name": "priority:high"}]
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert status == "in-progress"
         assert assignee is None
         assert priority == "high"
         assert has_feedback is False
+        assert is_approved is False
 
     def test_parse_labels_assignee(self, mock_token):
         """Extracts assignee:* labels correctly."""
@@ -349,7 +352,9 @@ class TestLabelParsing:
             {"name": "status:pending"},
         ]
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert assignee == "alice-chen"
         assert status == "pending"
@@ -361,7 +366,9 @@ class TestLabelParsing:
             {"name": "priority:medium"},
         ]
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert priority == "medium"
 
@@ -370,9 +377,12 @@ class TestLabelParsing:
         client = GitHubClient("owner", "repo")
         labels = [{"name": "status:feedback-requested"}]
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert has_feedback is True
+        assert is_approved is False
         # feedback-requested should not set status
         assert status is None
 
@@ -381,12 +391,15 @@ class TestLabelParsing:
         client = GitHubClient("owner", "repo")
         labels = []
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert status is None
         assert assignee is None
         assert priority is None
         assert has_feedback is False
+        assert is_approved is False
 
     def test_parse_labels_all_fields(self, mock_token):
         """Extracts all label types correctly."""
@@ -398,12 +411,15 @@ class TestLabelParsing:
             {"name": "type:bug"},  # Should be ignored
         ]
 
-        status, assignee, priority, has_feedback = client._parse_labels(labels)
+        status, assignee, priority, has_feedback, is_approved = client._parse_labels(
+            labels
+        )
 
         assert status == "in-review"
         assert assignee == "bob-smith"
         assert priority == "low"
         assert has_feedback is False
+        assert is_approved is False
 
     def test_parse_reviewer_label(self, mock_token):
         """Extracts reviewer:* labels correctly."""
@@ -956,7 +972,7 @@ class TestHighLevelMethods:
     @pytest.mark.asyncio
     @respx.mock
     async def test_get_pr_status(self, client):
-        """get_pr_status combines PR, reviews, and labels correctly."""
+        """get_pr_status combines PR and labels correctly."""
         # Mock get_pr
         respx.get("https://api.github.com/repos/test-owner/test-repo/pulls/5").mock(
             return_value=httpx.Response(
@@ -975,21 +991,9 @@ class TestHighLevelMethods:
                     "labels": [
                         {"name": "assignee:alice"},
                         {"name": "reviewer:rachel"},
-                        {"name": "status:in-review"},
+                        {"name": "status:approved"},
                     ],
                 },
-            )
-        )
-        # Mock get_pr_reviews
-        respx.get(
-            "https://api.github.com/repos/test-owner/test-repo/pulls/5/reviews"
-        ).mock(
-            return_value=httpx.Response(
-                200,
-                json=[
-                    {"id": 1, "state": "COMMENTED", "user": {"login": "bob"}},
-                    {"id": 2, "state": "APPROVED", "user": {"login": "rachel"}},
-                ],
             )
         )
 
@@ -1002,10 +1006,10 @@ class TestHighLevelMethods:
         assert result.assignee == "alice"
         assert result.reviewer == "rachel"
         assert result.has_feedback is False
+        assert result.is_approved is True
         assert result.mergeable is True
         assert result.has_conflicts is False
         assert result.linked_issue == 2
-        assert result.review_state == "APPROVED"
         assert result.head_branch == "feature-branch"
         assert result.base_branch == "main"
 
@@ -1030,13 +1034,11 @@ class TestHighLevelMethods:
                 },
             )
         )
-        respx.get(
-            "https://api.github.com/repos/test-owner/test-repo/pulls/5/reviews"
-        ).mock(return_value=httpx.Response(200, json=[]))
 
         result = await client.get_pr_status(5)
 
         assert result.has_feedback is True
+        assert result.is_approved is False
 
     @pytest.mark.asyncio
     @respx.mock
@@ -1057,9 +1059,6 @@ class TestHighLevelMethods:
                 },
             )
         )
-        respx.get(
-            "https://api.github.com/repos/test-owner/test-repo/pulls/5/reviews"
-        ).mock(return_value=httpx.Response(200, json=[]))
 
         result = await client.get_pr_status(5)
 
@@ -1086,9 +1085,6 @@ class TestHighLevelMethods:
                 },
             )
         )
-        respx.get(
-            "https://api.github.com/repos/test-owner/test-repo/pulls/5/reviews"
-        ).mock(return_value=httpx.Response(200, json=[]))
 
         result = await client.get_pr_status(5)
 

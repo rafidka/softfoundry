@@ -361,6 +361,7 @@ The manager creates these labels on project setup:
 | `status:in-progress` | `#0e8a16` | Being worked on |
 | `status:in-review` | `#6f42c1` | PR awaiting review |
 | `status:feedback-requested` | `#d73a4a` | Reviewer requested changes on PR |
+| `status:approved` | `#0e8a16` | Reviewer approved PR (ready to merge) |
 | `priority:high` | `#d73a4a` | High priority |
 | `priority:medium` | `#fbca04` | Medium priority |
 | `priority:low` | `#0e8a16` | Low priority |
@@ -459,11 +460,11 @@ The `mcp/` package provides an MCP server for agent coordination. All agents use
 *Epic/Issue Tools:*
 - `get_epic_status(epic_number)` - Get epic with all sub-issue statuses
 - `get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
-- `list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues
+- `list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues (automatically filters out tasks with unresolved dependencies)
 - `list_my_sub_issues(epic_number, agent_name)` - List assigned sub-issues
-- `claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue
+- `claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue (validates dependencies are resolved)
 - `update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
-- `create_sub_issue(epic_number, title, body, priority)` - Create and link sub-issue
+- `create_sub_issue(epic_number, title, body, priority, depends_on)` - Create and link sub-issue (depends_on is a comma-separated string of issue numbers, e.g. "3,5")
 - `close_epic(epic_number)` - Close the epic
 
 *PR Tools:*

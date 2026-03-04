@@ -8,7 +8,6 @@ from pydantic import BaseModel
 # Status values from labels
 IssueStatusLabel = Literal["pending", "in-progress", "in-review"]
 PriorityLabel = Literal["high", "medium", "low"]
-ReviewState = Literal["PENDING", "APPROVED", "CHANGES_REQUESTED", "COMMENTED"]
 ActivityEventType = Literal[
     "started",
     "claimed",
@@ -34,6 +33,7 @@ class SubIssueStatus(BaseModel):
     assignee: str | None  # from assignee:* label
     priority: str | None  # high, medium, low (from priority:* label)
     linked_pr: int | None  # PR number if one exists
+    depends_on: list[int] = []  # issue numbers this task depends on
 
 
 class EpicStatus(BaseModel):
@@ -57,10 +57,10 @@ class PRStatus(BaseModel):
     assignee: str | None  # from assignee:* label (agent who owns this PR)
     reviewer: str | None  # from reviewer:* label
     has_feedback: bool  # True if status:feedback-requested label exists
+    is_approved: bool  # True if status:approved label exists
     mergeable: bool
     has_conflicts: bool
     linked_issue: int | None  # from "Closes #N" or "Fixes #N"
-    review_state: str | None  # PENDING, APPROVED, CHANGES_REQUESTED, COMMENTED
     head_branch: str  # branch name
     base_branch: str  # target branch (usually main)
 
