@@ -22,11 +22,12 @@ import httpx
 import pytest
 import respx
 
+from softfoundry.mcp.constants import DEFAULT_GITHUB_REPO
 from softfoundry.mcp.github_client import GitHubClient, GitHubClientError
 from softfoundry.mcp.types import EpicStatus, PRStatus, SubIssueStatus
 
 # Integration test repository
-INTEGRATION_TEST_REPO = "rafidka/softfoundry-integ-tests"
+INTEGRATION_TEST_REPO = DEFAULT_GITHUB_REPO
 
 
 # -----------------------------------------------------------------------------
@@ -882,7 +883,7 @@ class TestHighLevelMethods:
         sub1 = result.sub_issues[0]
         assert isinstance(sub1, SubIssueStatus)
         assert sub1.number == 2
-        assert sub1.status == "in-progress"
+        assert sub1.sf_status == "in-progress"
         assert sub1.assignee == "alice"
         assert sub1.priority == "high"
 
@@ -932,7 +933,7 @@ class TestHighLevelMethods:
         assert isinstance(result, SubIssueStatus)
         assert result.number == 3
         assert result.title == "Task 2"
-        assert result.status == "in-progress"
+        assert result.sf_status == "in-progress"
         assert result.assignee == "bob"
 
     @pytest.mark.asyncio

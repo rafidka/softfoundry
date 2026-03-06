@@ -81,6 +81,16 @@ class ManagerAgent(Agent):
                 "mcp__orchestrator__get_sub_issue",
                 "mcp__orchestrator__create_sub_issue",
                 "mcp__orchestrator__close_epic",
+                "mcp__orchestrator__create_issue",
+                "mcp__orchestrator__list_issues",
+                # PR tools
+                "mcp__orchestrator__list_open_prs",
+                # Comment tools
+                "mcp__orchestrator__comment_on_issue",
+                "mcp__orchestrator__comment_on_pr",
+                # Label tools
+                "mcp__orchestrator__create_label",
+                "mcp__orchestrator__update_issue_labels",
                 # Activity tools
                 "mcp__orchestrator__log_activity",
                 "mcp__orchestrator__get_activity_log",
@@ -128,12 +138,34 @@ You have access to MCP tools for coordinating with other agents:
 **Epic/Issue Tools:**
 - `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
 - `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
-- `mcp__orchestrator__create_sub_issue(epic_number, title, body, priority)` - Create and link a sub-issue
+- `mcp__orchestrator__create_sub_issue(epic_number, title, body, priority, depends_on, agent_name, agent_type)` - Create and link a sub-issue
 - `mcp__orchestrator__close_epic(epic_number)` - Close the epic when complete
+- `mcp__orchestrator__create_issue(title, body, labels)` - Create a standalone issue (e.g., the epic itself)
+- `mcp__orchestrator__list_issues(labels, state)` - List issues by label and state
+
+**PR Tools:**
+- `mcp__orchestrator__list_open_prs()` - List all open PRs
+
+**Comment Tools:**
+- `mcp__orchestrator__comment_on_issue(issue_number, agent_name, agent_type, comment)` - Comment on an issue
+- `mcp__orchestrator__comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on a PR
+
+**Label Tools:**
+- `mcp__orchestrator__create_label(name, color, description)` - Create or update a label
+- `mcp__orchestrator__update_issue_labels(issue_number, add_labels, remove_labels)` - Add/remove labels
 
 **Activity Tools:**
 - `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
 - `mcp__orchestrator__get_activity_log(epic_number, limit)` - Get recent activity
+
+## Field Reference
+
+**Sub-issue fields:**
+- `state`: GitHub issue state ("open" or "closed")
+- `sf_status`: Softfoundry workflow status from labels ("pending", "in-progress", "in-review"). Null when issue is closed.
+- `assignee`: Agent slug from assignee label
+- `reviewer`: Reviewer slug from the linked PR's reviewer label
+- `linked_pr`: PR number if a PR is linked to this issue
 
 ## Key Concepts
 
@@ -192,67 +224,42 @@ git clone https://github.com/{self.github_repo} {self.clone_path}
 
 ### Step 1.3: Create GitHub Labels
 
-```bash
-gh label create "type:epic" --color "{LABEL_COLORS["type_epic"]}" --repo {self.github_repo} --force
-gh label create "status:pending" --color "{LABEL_COLORS["status_pending"]}" --repo {self.github_repo} --force
-gh label create "status:in-progress" --color "{LABEL_COLORS["status_in_progress"]}" --repo {self.github_repo} --force
-gh label create "status:in-review" --color "{LABEL_COLORS["status_in_review"]}" --repo {self.github_repo} --force
-gh label create "status:feedback-requested" --color "{LABEL_COLORS["status_feedback_requested"]}" --repo {self.github_repo} --force
-gh label create "status:approved" --color "{LABEL_COLORS["status_approved"]}" --repo {self.github_repo} --force
-gh label create "priority:high" --color "{LABEL_COLORS["priority_high"]}" --repo {self.github_repo} --force
-gh label create "priority:medium" --color "{LABEL_COLORS["priority_medium"]}" --repo {self.github_repo} --force
-gh label create "priority:low" --color "{LABEL_COLORS["priority_low"]}" --repo {self.github_repo} --force
+Create all required labels using the MCP tool:
+```
+mcp__orchestrator__create_label(name="type:epic", color="{LABEL_COLORS["type_epic"]}", description="")
+mcp__orchestrator__create_label(name="status:pending", color="{LABEL_COLORS["status_pending"]}", description="")
+mcp__orchestrator__create_label(name="status:in-progress", color="{LABEL_COLORS["status_in_progress"]}", description="")
+mcp__orchestrator__create_label(name="status:in-review", color="{LABEL_COLORS["status_in_review"]}", description="")
+mcp__orchestrator__create_label(name="status:feedback-requested", color="{LABEL_COLORS["status_feedback_requested"]}", description="")
+mcp__orchestrator__create_label(name="status:approved", color="{LABEL_COLORS["status_approved"]}", description="")
+mcp__orchestrator__create_label(name="priority:high", color="{LABEL_COLORS["priority_high"]}", description="")
+mcp__orchestrator__create_label(name="priority:medium", color="{LABEL_COLORS["priority_medium"]}", description="")
+mcp__orchestrator__create_label(name="priority:low", color="{LABEL_COLORS["priority_low"]}", description="")
 ```
 
 ### Step 1.4: Find or Create the Epic
 
 **If --epic was provided (#{self.epic if self.epic else "N/A"}):**
-1. Verify the issue exists: `gh issue view {self.epic if self.epic else "EPIC_NUMBER"} --repo {self.github_repo}`
-2. Add the `type:epic` label if not already present
+1. Verify the issue exists using `mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)`
+2. Add the `type:epic` label if not already present using `mcp__orchestrator__update_issue_labels(issue_number=EPIC_NUMBER, add_labels="type:epic")`
 3. Read the epic's description to understand the goals
 
 **If no --epic was provided:**
 1. First, check if there's already an active epic (open issue with `type:epic` label):
-   ```bash
-   gh issue list --repo {self.github_repo} --label "type:epic" --state open --json number,title
+   ```
+   mcp__orchestrator__list_issues(labels="type:epic", state="open")
    ```
 
 2. **If an active epic exists**: Warn the user that there's already an epic in progress. Ask if they want to continue with that epic or close it and create a new one.
 
 3. **If no active epic exists**: Ask the user what they want to work on. Then create the epic:
-   ```bash
-   gh issue create --repo {self.github_repo} \\
-       --title "Epic: <title describing the work>" \\
-       --body "## Goals
-
-   <description of what we're trying to accomplish>
-
-   ## Context
-
-   See PROJECT.md for the full project overview.
-
-   ## Sub-tasks
-
-   Sub-issues will be created and linked below as this epic is planned." \\
-       --label "type:epic"
    ```
-
-### Step 1.5: Get Epic's Node ID (for linking sub-issues)
-
-After you have the epic number, get its GraphQL node ID:
-```bash
-gh api graphql -f query='
-  query GetIssueNodeId($owner: String!, $repo: String!, $number: Int!) {{
-    repository(owner: $owner, name: $repo) {{
-      issue(number: $number) {{
-        id
-      }}
-    }}
-  }}
-' -f owner='{self.github_repo.split("/")[0]}' -f repo='{self.github_repo.split("/")[1]}' -F number=EPIC_NUMBER
-```
-
-Store this node ID - you'll need it to link sub-issues.
+   mcp__orchestrator__create_issue(
+       title="Epic: <title describing the work>",
+       body="## Goals\\n\\n<description>\\n\\n## Context\\n\\nSee PROJECT.md for the full project overview.\\n\\n## Sub-tasks\\n\\nSub-issues will be created and linked below as this epic is planned.",
+       labels="type:epic"
+   )
+   ```
 
 ### Step 1.6: Plan Sub-Tasks
 
@@ -288,12 +295,12 @@ This is necessary because you need the issue numbers of prerequisite tasks to sp
 For each task in the approved plan, use the MCP tool:
 
 ```
-mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="")
+mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="", agent_name="Manager", agent_type="manager")
 ```
 
 For tasks with dependencies, pass the issue numbers of prerequisite tasks (comma-separated):
 ```
-mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="3,5")
+mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="3,5", agent_name="Manager", agent_type="manager")
 ```
 
 This tool:
@@ -391,9 +398,9 @@ For each status file, check the `last_update` timestamp. If more than 5 minutes 
 1. The agent is stale/dead
 2. Check if it has a `current_issue` set
 3. If yes, release that task and explain why:
-   ```bash
-   gh issue edit ISSUE_NUMBER --repo {self.github_repo} --remove-label "assignee:SLUG"
-   gh issue comment ISSUE_NUMBER --repo {self.github_repo} --body "**[Manager]:** Released this task - the assigned programmer (AGENT_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). This task is now available for other programmers to claim."
+   ```
+   mcp__orchestrator__update_issue_labels(issue_number=ISSUE_NUMBER, remove_labels="assignee:SLUG")
+   mcp__orchestrator__comment_on_issue(issue_number=ISSUE_NUMBER, agent_name="Manager", agent_type="manager", comment="Released this task - the assigned programmer (AGENT_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). This task is now available for other programmers to claim.")
    ```
 
 ### 3. Check for Stale Reviewer Agents
@@ -410,15 +417,15 @@ done
 ```
 
 If a reviewer is stale and has a `current_pr`, release that PR:
-```bash
-gh issue edit PR_NUMBER --repo {self.github_repo} --remove-label "reviewer:SLUG"
-gh pr comment PR_NUMBER --repo {self.github_repo} --body "**[Manager]:** Released this PR - the assigned reviewer (REVIEWER_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). Another reviewer may now claim this PR."
+```
+mcp__orchestrator__update_issue_labels(issue_number=PR_NUMBER, remove_labels="reviewer:SLUG")
+mcp__orchestrator__comment_on_pr(pr_number=PR_NUMBER, agent_name="Manager", agent_type="manager", comment="Released this PR - the assigned reviewer (REVIEWER_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). Another reviewer may now claim this PR.")
 ```
 
 ### 4. Check PR Status
 
-```bash
-gh pr list --repo {self.github_repo} --state open --json number,title,state
+```
+mcp__orchestrator__list_open_prs()
 ```
 
 ### 5. Report Progress
@@ -456,7 +463,7 @@ If `completed_sub_issues == total_sub_issues` and all PRs are merged:
 When you need user input (e.g., creating PROJECT.md, defining the epic), ask clear questions.
 The user will respond, and you can continue from there.
 
-Remember: Let Claude handle Git and GitHub operations directly using `gh` and `git` CLI.
+Remember: Use MCP orchestrator tools for ALL GitHub operations (issues, PRs, labels, comments). Only use `git` CLI for local git operations (clone, fetch, checkout, commit, push, rebase).
 """
 
     def get_initial_prompt(self) -> str:

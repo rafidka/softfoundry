@@ -96,6 +96,14 @@ class ProgrammerAgent(Agent):
                 "mcp__orchestrator__get_pr_status",
                 "mcp__orchestrator__list_my_prs",
                 "mcp__orchestrator__mark_feedback_addressed",
+                "mcp__orchestrator__get_pr_feedback",
+                "mcp__orchestrator__create_pr",
+                "mcp__orchestrator__merge_pr",
+                # Comment tools
+                "mcp__orchestrator__comment_on_issue",
+                "mcp__orchestrator__comment_on_pr",
+                # Label tools
+                "mcp__orchestrator__create_label",
                 # Activity tools
                 "mcp__orchestrator__log_activity",
                 "mcp__orchestrator__get_activity_log",
@@ -140,10 +148,29 @@ You have access to MCP tools for coordinating with other agents. Use these inste
 **PR Tools:**
 - `mcp__orchestrator__get_pr_status(pr_number)` - Get PR status including `has_feedback` flag
 - `mcp__orchestrator__list_my_prs(author_name)` - List your open PRs
-- `mcp__orchestrator__mark_feedback_addressed(pr_number)` - Mark feedback as addressed
+- `mcp__orchestrator__mark_feedback_addressed(pr_number, agent_name, agent_type, comment)` - Mark feedback as addressed
+- `mcp__orchestrator__get_pr_feedback(pr_number)` - Get reviews and inline diff-level comments
+- `mcp__orchestrator__create_pr(title, body, head_branch, base_branch, agent_name, agent_type, labels)` - Create a PR
+- `mcp__orchestrator__merge_pr(pr_number, method, delete_branch)` - Merge a PR (method: squash/merge/rebase)
+
+**Comment Tools:**
+- `mcp__orchestrator__comment_on_issue(issue_number, agent_name, agent_type, comment)` - Comment on an issue
+- `mcp__orchestrator__comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on a PR
+
+**Label Tools:**
+- `mcp__orchestrator__create_label(name, color, description)` - Create or update a label
 
 **Activity Tools:**
 - `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
+
+## Field Reference
+
+**Sub-issue fields:**
+- `state`: GitHub issue state ("open" or "closed")
+- `sf_status`: Softfoundry workflow status from labels ("pending", "in-progress", "in-review"). Null when issue is closed.
+- `assignee`: Agent slug from assignee label
+- `reviewer`: Reviewer slug from the linked PR's reviewer label
+- `linked_pr`: PR number if a PR is linked to this issue
 
 ## Status File Updates
 
@@ -179,8 +206,8 @@ This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL 
 ## Initial Setup: Self-Registration
 
 On first run, create your assignee label if it doesn't exist:
-```bash
-gh label create "assignee:{self.name_slug}" --color "{LABEL_COLORS["assignee"]}" --repo {self.github_repo} --force 2>/dev/null || true
+```
+mcp__orchestrator__create_label(name="assignee:{self.name_slug}", color="{LABEL_COLORS["assignee"]}", description="")
 ```
 
 Then log your start:
@@ -262,8 +289,8 @@ git checkout -b feature/issue-N-slug origin/main
 ```
 
 b. Comment on the issue (with your signature):
-```bash
-gh issue comment N --repo {self.github_repo} --body "{format_signature(self.name, "Programmer")} Starting implementation."
+```
+mcp__orchestrator__comment_on_issue(issue_number=N, agent_name="{self.name}", agent_type="programmer", comment="Starting implementation.")
 ```
 
 c. Update your status file with current_issue
@@ -303,12 +330,8 @@ git push -u origin feature/issue-N-slug
 ```
 
 Create the PR with your assignee label:
-```bash
-gh pr create --repo {self.github_repo} --title "Title" --body "## Summary
-
-Description
-
-Closes #N" --label "assignee:{self.name_slug}"
+```
+mcp__orchestrator__create_pr(title="Title", body="## Summary\\n\\nDescription\\n\\nCloses #N", head_branch="feature/issue-N-slug", base_branch="main", agent_name="{self.name}", agent_type="programmer", labels="assignee:{self.name_slug}")
 ```
 
 Update the sub-issue status:
@@ -339,14 +362,11 @@ This returns a JSON object with:
 - Clean up and find next task (go to section 9, then section 10)
 
 **If `has_feedback` is True:**
-1. Read the review comments:
-   ```bash
-   gh api repos/{self.github_repo}/pulls/PR_NUMBER/comments --jq '.[] | "File: " + .path + " Line: " + (.line|tostring) + " Comment: " + .body'
+1. Read the review comments (both top-level reviews and inline diff comments):
    ```
-   Also check for review body comments:
-   ```bash
-   gh pr view PR_NUMBER --repo {self.github_repo} --json reviews --jq '.reviews[] | select(.state == "CHANGES_REQUESTED") | .body'
+   mcp__orchestrator__get_pr_feedback(pr_number=PR_NUMBER)
    ```
+   This returns `reviews` (top-level review bodies) and `inline_comments` (diff-level comments with file path and line number).
 
 2. Address each piece of feedback by making the necessary code changes
 
@@ -359,7 +379,7 @@ This returns a JSON object with:
 
 4. Mark feedback as addressed:
    ```
-   mcp__orchestrator__mark_feedback_addressed(pr_number=PR_NUMBER)
+   mcp__orchestrator__mark_feedback_addressed(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="programmer", comment="Addressed reviewer feedback. Ready for re-review.")
    ```
 
 5. Log the activity:
@@ -371,8 +391,8 @@ This returns a JSON object with:
 
 **If `is_approved` is True and `has_feedback` is False:**
 - Great! Your PR has been approved. Now YOU should merge it:
-  ```bash
-  gh pr merge PR_NUMBER --repo {self.github_repo} --squash --delete-branch
+  ```
+  mcp__orchestrator__merge_pr(pr_number=PR_NUMBER, method="squash", delete_branch="true")
   ```
 - If merge succeeds, go to Section 9 to clean up, then Section 10 to find next task
 - If merge fails due to conflicts, go to Section 8 to resolve them
@@ -395,8 +415,8 @@ git push --force-with-lease
 ```
 
 After resolving conflicts, add a comment:
-```bash
-gh pr comment PR_NUMBER --repo {self.github_repo} --body "{format_signature(self.name, "Programmer")} Rebased and resolved conflicts. Ready for review."
+```
+mcp__orchestrator__comment_on_pr(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="programmer", comment="Rebased and resolved conflicts. Ready for review.")
 ```
 
 ### 9. Clean Up After Merge

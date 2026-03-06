@@ -4,12 +4,13 @@ This module provides an MCP server that all agents use for GitHub coordination.
 It offers structured access to epic/sub-issue state, PR status, and activity logging.
 
 The module is organized as:
-- Helper functions (_success, _error, etc.)
+- Helper functions (_success, _error, _format_signature, etc.)
 - Implementation functions (impl_*) - testable business logic
 - Tool-decorated wrappers (tool_*) - MCP integration
 - Server factory (create_orchestrator_server)
 """
 
+import json as json_module
 from datetime import datetime, timezone
 from typing import Any
 
@@ -39,14 +40,14 @@ def _success(data: Any) -> dict[str, Any]:
 
 def _json_success(data: Any) -> dict[str, Any]:
     """Create a success response with JSON data."""
-    import json
-
     if isinstance(data, BaseModel):
         data = data.model_dump()
     elif isinstance(data, list) and data and isinstance(data[0], BaseModel):
         data = [item.model_dump() for item in data]
     return {
-        "content": [{"type": "text", "text": json.dumps(data, indent=2, default=str)}]
+        "content": [
+            {"type": "text", "text": json_module.dumps(data, indent=2, default=str)}
+        ]
     }
 
 
@@ -55,9 +56,65 @@ def _error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"Error: {message}"}], "isError": True}
 
 
+def _format_signature(agent_name: str, agent_type: str) -> str:
+    """Format the agent signature prefix for comments.
+
+    Example: "**[Alice Chen - Programmer]:**"
+    """
+    return f"**[{agent_name} - {agent_type.capitalize()}]:**"
+
+
+def _format_inline_signature(agent_name: str) -> str:
+    """Format the agent signature prefix for inline diff comments.
+
+    Example: "[Alice Chen]"
+    """
+    return f"[{agent_name}]"
+
+
+def _parse_inline_comments(inline_str: str, agent_name: str) -> list[dict[str, Any]]:
+    """Parse inline comments from newline-separated string format.
+
+    Format: "path:line:body" separated by newlines.
+    The body can contain colons (only first two colons are split on).
+    Each comment body is prefixed with the agent's inline signature.
+
+    Args:
+        inline_str: Newline-separated inline comments.
+        agent_name: Agent name for signature prefix.
+
+    Returns:
+        List of dicts with keys: path, line, body.
+    """
+    comments = []
+    for line in inline_str.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path, line_num, body = parts
+        try:
+            comments.append(
+                {
+                    "path": path.strip(),
+                    "line": int(line_num.strip()),
+                    "body": f"{_format_inline_signature(agent_name)} {body.strip()}",
+                }
+            )
+        except ValueError:
+            # Skip lines with non-numeric line numbers
+            continue
+    return comments
+
+
 # =============================================================================
 # Implementation Functions (testable)
 # =============================================================================
+
+
+# ---- Epic/Issue Tools ----
 
 
 async def impl_get_epic_status(args: dict[str, Any]) -> dict[str, Any]:
@@ -103,7 +160,7 @@ async def impl_list_available_sub_issues(args: dict[str, Any]) -> dict[str, Any]
             for si in epic_status.sub_issues
             if si.state == "open"
             and si.assignee is None
-            and si.status in (None, "pending")
+            and si.sf_status in (None, "pending")
         ]
 
         # Filter out tasks with unresolved dependencies
@@ -250,8 +307,13 @@ async def impl_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
                 if d.strip()
             ]
 
-        # Build the issue body, appending dependency metadata if present
+        # Build the issue body with author signature
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "")
         body = args["body"]
+        if agent_name and agent_type:
+            body = f"**Author:** {agent_name} ({agent_type.capitalize()})\n\n{body}"
+
         if depends_on:
             deps_ref = ", ".join(f"#{d}" for d in depends_on)
             body = f"{body}\n\nDependencies: {deps_ref}"
@@ -290,6 +352,9 @@ async def impl_close_epic(args: dict[str, Any]) -> dict[str, Any]:
         return _success(f"Closed epic #{args['epic_number']}")
     except GitHubClientError as e:
         return _error(str(e))
+
+
+# ---- PR Tools ----
 
 
 async def impl_get_pr_status(args: dict[str, Any]) -> dict[str, Any]:
@@ -365,8 +430,7 @@ async def impl_list_prs_for_review(args: dict[str, Any]) -> dict[str, Any]:
 
         # Filter to PRs that:
         # 1. Are linked to a sub-issue of this epic
-        # 2. Have status:in-review label (or no reviewer assigned)
-        # 3. Don't have a reviewer assigned
+        # 2. Don't have a reviewer assigned
         available_prs = []
         for pr in prs:
             pr_status = await client.get_pr_status(pr["number"])
@@ -416,8 +480,11 @@ async def impl_request_changes(args: dict[str, Any]) -> dict[str, Any]:
     """Request changes on a PR.
 
     Adds the `status:feedback-requested` label and removes `status:approved`
-    if present (in case of a re-review cycle where the reviewer previously
-    approved but now requests changes).
+    if present. Posts a COMMENT review (not REQUEST_CHANGES, since GitHub
+    rejects self-reviews and all agents share one account).
+
+    Supports inline diff-level comments via the inline_comments parameter,
+    which uses newline-separated "path:line:body" format.
     """
     try:
         client = _get_client()
@@ -429,16 +496,31 @@ async def impl_request_changes(args: dict[str, Any]) -> dict[str, Any]:
             remove_labels=["status:approved"],
         )
 
-        # Attempt to create a review with REQUEST_CHANGES (may not persist for self-reviews)
-        try:
-            await client.create_pr_review(
-                args["pr_number"],
-                event="REQUEST_CHANGES",
-                body=args["comment"],
-            )
-        except GitHubClientError:
-            # Self-reviews may fail — the label is the source of truth
-            pass
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "reviewer")
+        comment = args["comment"]
+        inline_str = args.get("inline_comments", "")
+
+        # Format the top-level comment with agent signature
+        formatted_comment = comment
+        if agent_name:
+            formatted_comment = f"{_format_signature(agent_name, agent_type)} {comment}"
+
+        if inline_str:
+            # Parse inline comments and post as a COMMENT review with diff annotations
+            inline_comments = _parse_inline_comments(inline_str, agent_name)
+            if inline_comments:
+                await client.create_pr_review_with_comments(
+                    args["pr_number"],
+                    body=formatted_comment,
+                    inline_comments=inline_comments,
+                )
+            else:
+                # Inline string was provided but couldn't be parsed; post as comment
+                await client.create_issue_comment(args["pr_number"], formatted_comment)
+        else:
+            # No inline comments — post as a regular issue comment
+            await client.create_issue_comment(args["pr_number"], formatted_comment)
 
         return _success(
             f"Requested changes on PR #{args['pr_number']} and added feedback-requested label"
@@ -448,7 +530,11 @@ async def impl_request_changes(args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def impl_mark_feedback_addressed(args: dict[str, Any]) -> dict[str, Any]:
-    """Mark that feedback has been addressed."""
+    """Mark that feedback has been addressed.
+
+    Removes the feedback-requested label and posts a comment with the
+    agent's signature.
+    """
     try:
         client = _get_client()
 
@@ -458,11 +544,19 @@ async def impl_mark_feedback_addressed(args: dict[str, Any]) -> dict[str, Any]:
             remove_labels=["status:feedback-requested"],
         )
 
-        # Add a comment noting feedback was addressed
-        await client.create_issue_comment(
-            args["pr_number"],
-            "Feedback has been addressed. Ready for re-review.",
+        # Build comment with agent signature
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "programmer")
+        comment = args.get(
+            "comment", "Feedback has been addressed. Ready for re-review."
         )
+
+        if agent_name:
+            formatted = f"{_format_signature(agent_name, agent_type)} {comment}"
+        else:
+            formatted = comment
+
+        await client.create_issue_comment(args["pr_number"], formatted)
 
         return _success(f"Marked feedback addressed on PR #{args['pr_number']}")
     except GitHubClientError as e:
@@ -473,8 +567,9 @@ async def impl_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
     """Approve a pull request.
 
     Adds the `status:approved` label and removes `status:feedback-requested`
-    if present. Also attempts to create a GitHub APPROVE review (may be
-    silently ignored for self-reviews since all agents share one account).
+    if present. Posts a COMMENT review with the approval message (not an
+    APPROVE event, since GitHub rejects self-reviews). The label is the
+    source of truth for approval status.
     """
     try:
         client = _get_client()
@@ -486,21 +581,342 @@ async def impl_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
             remove_labels=["status:feedback-requested"],
         )
 
-        # Attempt to create an approval review (may not persist for self-reviews)
+        # Post approval comment using COMMENT event (works on self-reviews)
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "reviewer")
         comment = args.get("comment", "LGTM!")
-        try:
-            await client.create_pr_review(
-                args["pr_number"],
-                event="APPROVE",
-                body=comment,
-            )
-        except GitHubClientError:
-            # Self-reviews may fail — the label is the source of truth
-            pass
+
+        if agent_name:
+            formatted = f"{_format_signature(agent_name, agent_type)} {comment}"
+        else:
+            formatted = comment
+
+        await client.create_issue_comment(args["pr_number"], formatted)
 
         return _success(f"Approved PR #{args['pr_number']}")
     except GitHubClientError as e:
         return _error(str(e))
+
+
+# ---- Comment Tools ----
+
+
+async def impl_comment_on_issue(args: dict[str, Any]) -> dict[str, Any]:
+    """Post a formatted comment on an issue with agent signature."""
+    try:
+        client = _get_client()
+
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "")
+        comment = args["comment"]
+
+        if agent_name and agent_type:
+            formatted = f"{_format_signature(agent_name, agent_type)} {comment}"
+        else:
+            formatted = comment
+
+        result = await client.create_issue_comment(args["issue_number"], formatted)
+        return _json_success(
+            {
+                "comment_id": result["id"],
+                "url": result["html_url"],
+                "message": f"Comment posted on issue #{args['issue_number']}",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_comment_on_pr(args: dict[str, Any]) -> dict[str, Any]:
+    """Post a formatted comment on a PR with agent signature."""
+    try:
+        client = _get_client()
+
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "")
+        comment = args["comment"]
+
+        if agent_name and agent_type:
+            formatted = f"{_format_signature(agent_name, agent_type)} {comment}"
+        else:
+            formatted = comment
+
+        # GitHub treats PRs as issues for comments
+        result = await client.create_issue_comment(args["pr_number"], formatted)
+        return _json_success(
+            {
+                "comment_id": result["id"],
+                "url": result["html_url"],
+                "message": f"Comment posted on PR #{args['pr_number']}",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+# ---- PR Creation/Merge Tools ----
+
+
+async def impl_create_pr(args: dict[str, Any]) -> dict[str, Any]:
+    """Create a pull request with agent signature in the body."""
+    try:
+        client = _get_client()
+
+        agent_name = args.get("agent_name", "")
+        agent_type = args.get("agent_type", "programmer")
+        body = args["body"]
+
+        # Prepend author signature to body
+        if agent_name:
+            body = f"**Author:** {agent_name} ({agent_type.capitalize()})\n\n{body}"
+
+        # Parse labels from comma-separated string
+        labels_str = args.get("labels", "")
+        labels = (
+            [label.strip() for label in labels_str.split(",") if label.strip()]
+            if labels_str
+            else None
+        )
+
+        base = args.get("base_branch", "main")
+
+        pr = await client.create_pull_request(
+            title=args["title"],
+            body=body,
+            head=args["head_branch"],
+            base=base,
+            labels=labels,
+        )
+
+        return _json_success(
+            {
+                "number": pr["number"],
+                "title": pr["title"],
+                "url": pr["html_url"],
+                "head_branch": pr["head"]["ref"],
+                "base_branch": pr["base"]["ref"],
+                "message": f"Created PR #{pr['number']}",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_merge_pr(args: dict[str, Any]) -> dict[str, Any]:
+    """Merge a pull request."""
+    try:
+        client = _get_client()
+
+        method = args.get("method", "squash")
+        if method not in ("merge", "squash", "rebase"):
+            return _error(
+                f"Invalid merge method: {method}. Must be merge, squash, or rebase"
+            )
+
+        delete_branch = args.get("delete_branch", True)
+        # Handle string "true"/"false" from MCP args
+        if isinstance(delete_branch, str):
+            delete_branch = delete_branch.lower() in ("true", "1", "yes")
+
+        result = await client.merge_pr(
+            args["pr_number"],
+            method=method,
+            delete_branch=delete_branch,
+        )
+
+        return _json_success(
+            {
+                "merged": True,
+                "sha": result.get("sha", ""),
+                "message": f"Successfully merged PR #{args['pr_number']} via {method}",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_get_pr_feedback(args: dict[str, Any]) -> dict[str, Any]:
+    """Get combined reviews and inline comments for a PR."""
+    try:
+        client = _get_client()
+
+        # Get PR reviews (top-level review bodies + state)
+        reviews_data = await client.get_pr_reviews(args["pr_number"])
+        reviews = [
+            {
+                "id": r["id"],
+                "state": r["state"],
+                "body": r.get("body", ""),
+                "submitted_at": r.get("submitted_at", ""),
+            }
+            for r in reviews_data
+            if r.get("body")  # Skip reviews with empty bodies
+        ]
+
+        # Get inline review comments (diff-level)
+        comments_data = await client.get_pr_review_comments(args["pr_number"])
+        inline_comments = [
+            {
+                "id": c["id"],
+                "path": c.get("path", ""),
+                "line": c.get("line"),
+                "body": c.get("body", ""),
+                "created_at": c.get("created_at", ""),
+            }
+            for c in comments_data
+        ]
+
+        return _json_success(
+            {
+                "reviews": reviews,
+                "inline_comments": inline_comments,
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_get_pr_diff(args: dict[str, Any]) -> dict[str, Any]:
+    """Get the diff text of a pull request."""
+    try:
+        client = _get_client()
+        diff_text = await client.get_pr_diff(args["pr_number"])
+        return _success(diff_text)
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+# ---- Label Tools ----
+
+
+async def impl_create_label(args: dict[str, Any]) -> dict[str, Any]:
+    """Create or update a label."""
+    try:
+        client = _get_client()
+        description = args.get("description", "")
+        label = await client.create_label(args["name"], args["color"], description)
+        return _json_success(
+            {
+                "name": label["name"],
+                "color": label["color"],
+                "message": f"Label '{args['name']}' created/updated",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_update_issue_labels(args: dict[str, Any]) -> dict[str, Any]:
+    """Add or remove labels on an issue or PR."""
+    try:
+        client = _get_client()
+
+        # Parse comma-separated label strings
+        add_str = args.get("add_labels", "")
+        remove_str = args.get("remove_labels", "")
+        add_labels = (
+            [lbl.strip() for lbl in add_str.split(",") if lbl.strip()]
+            if add_str
+            else None
+        )
+        remove_labels = (
+            [lbl.strip() for lbl in remove_str.split(",") if lbl.strip()]
+            if remove_str
+            else None
+        )
+
+        await client.update_issue_labels(
+            args["issue_number"],
+            add_labels=add_labels,
+            remove_labels=remove_labels,
+        )
+
+        return _success(f"Updated labels on #{args['issue_number']}")
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+# ---- Issue Tools ----
+
+
+async def impl_create_issue(args: dict[str, Any]) -> dict[str, Any]:
+    """Create a standalone issue (not linked to an epic)."""
+    try:
+        client = _get_client()
+
+        # Parse labels from comma-separated string
+        labels_str = args.get("labels", "")
+        labels = (
+            [lbl.strip() for lbl in labels_str.split(",") if lbl.strip()]
+            if labels_str
+            else None
+        )
+
+        issue = await client.create_issue(args["title"], args["body"], labels)
+
+        return _json_success(
+            {
+                "number": issue["number"],
+                "title": issue["title"],
+                "url": issue["html_url"],
+                "message": f"Created issue #{issue['number']}",
+            }
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_list_issues(args: dict[str, Any]) -> dict[str, Any]:
+    """List issues filtered by labels and state."""
+    try:
+        client = _get_client()
+
+        labels = args.get("labels", "")
+        state = args.get("state", "open")
+
+        issues = await client.list_issues_by_labels(labels=labels, state=state)
+
+        # Return simplified issue data
+        result = [
+            {
+                "number": issue["number"],
+                "title": issue["title"],
+                "state": issue["state"],
+                "labels": [lbl["name"] for lbl in issue.get("labels", [])],
+            }
+            for issue in issues
+            if "pull_request" not in issue  # Exclude PRs from issue listing
+        ]
+
+        return _json_success(result)
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_list_open_prs(args: dict[str, Any]) -> dict[str, Any]:
+    """List all open pull requests."""
+    try:
+        client = _get_client()
+        prs = await client.list_prs(state="open")
+
+        result = [
+            {
+                "number": pr["number"],
+                "title": pr["title"],
+                "state": pr["state"],
+                "labels": [lbl["name"] for lbl in pr.get("labels", [])],
+                "head_branch": pr["head"]["ref"],
+                "base_branch": pr["base"]["ref"],
+            }
+            for pr in prs
+        ]
+
+        return _json_success(result)
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+# ---- Activity Tools ----
 
 
 async def impl_log_activity(args: dict[str, Any]) -> dict[str, Any]:
@@ -573,6 +989,8 @@ async def impl_get_activity_log(args: dict[str, Any]) -> dict[str, Any]:
 # MCP Tool Wrappers
 # =============================================================================
 
+# ---- Epic/Issue Tool Wrappers ----
+
 
 @tool(
     "get_epic_status",
@@ -631,7 +1049,15 @@ async def tool_update_sub_issue_status(args: dict[str, Any]) -> dict[str, Any]:
 @tool(
     "create_sub_issue",
     "Create a new sub-issue and link it to the epic. Use depends_on to specify issue numbers this task depends on (comma-separated, e.g. '3,5'). Leave empty for no dependencies.",
-    {"epic_number": int, "title": str, "body": str, "priority": str, "depends_on": str},
+    {
+        "epic_number": int,
+        "title": str,
+        "body": str,
+        "priority": str,
+        "depends_on": str,
+        "agent_name": str,
+        "agent_type": str,
+    },
 )
 async def tool_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_create_sub_issue(args)
@@ -644,6 +1070,9 @@ async def tool_create_sub_issue(args: dict[str, Any]) -> dict[str, Any]:
 )
 async def tool_close_epic(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_close_epic(args)
+
+
+# ---- PR Tool Wrappers ----
 
 
 @tool(
@@ -666,7 +1095,7 @@ async def tool_list_my_prs(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "list_my_reviews",
-    "List pull requests assigned to a specific reviewer",
+    "List pull requests assigned to a specific reviewer that need action",
     {"reviewer_name": str},
 )
 async def tool_list_my_reviews(args: dict[str, Any]) -> dict[str, Any]:
@@ -693,8 +1122,14 @@ async def tool_claim_pr_review(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "request_changes",
-    "Request changes on a PR (adds feedback-requested label and posts comment)",
-    {"pr_number": int, "comment": str},
+    "Request changes on a PR. Adds feedback-requested label and posts review comments. Use inline_comments for diff-level comments (newline-separated 'path:line:body' format).",
+    {
+        "pr_number": int,
+        "agent_name": str,
+        "agent_type": str,
+        "comment": str,
+        "inline_comments": str,
+    },
 )
 async def tool_request_changes(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_request_changes(args)
@@ -702,8 +1137,8 @@ async def tool_request_changes(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "mark_feedback_addressed",
-    "Mark that feedback has been addressed (removes feedback-requested label)",
-    {"pr_number": int},
+    "Mark that feedback has been addressed (removes feedback-requested label and posts comment)",
+    {"pr_number": int, "agent_name": str, "agent_type": str, "comment": str},
 )
 async def tool_mark_feedback_addressed(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_mark_feedback_addressed(args)
@@ -711,11 +1146,130 @@ async def tool_mark_feedback_addressed(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool(
     "approve_pr",
-    "Approve a pull request",
-    {"pr_number": int, "comment": str},
+    "Approve a pull request (adds approved label and posts comment)",
+    {"pr_number": int, "agent_name": str, "agent_type": str, "comment": str},
 )
 async def tool_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_approve_pr(args)
+
+
+@tool(
+    "get_pr_feedback",
+    "Get combined reviews and inline diff-level comments for a PR",
+    {"pr_number": int},
+)
+async def tool_get_pr_feedback(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_get_pr_feedback(args)
+
+
+@tool(
+    "get_pr_diff",
+    "Get the diff text of a pull request",
+    {"pr_number": int},
+)
+async def tool_get_pr_diff(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_get_pr_diff(args)
+
+
+@tool(
+    "create_pr",
+    "Create a pull request with agent signature in the body. Labels is a comma-separated string.",
+    {
+        "title": str,
+        "body": str,
+        "head_branch": str,
+        "base_branch": str,
+        "agent_name": str,
+        "agent_type": str,
+        "labels": str,
+    },
+)
+async def tool_create_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_create_pr(args)
+
+
+@tool(
+    "merge_pr",
+    "Merge a pull request. Method: merge, squash (default), or rebase. delete_branch defaults to true.",
+    {"pr_number": int, "method": str, "delete_branch": str},
+)
+async def tool_merge_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_merge_pr(args)
+
+
+# ---- Comment Tool Wrappers ----
+
+
+@tool(
+    "comment_on_issue",
+    "Post a comment on an issue with agent signature",
+    {"issue_number": int, "agent_name": str, "agent_type": str, "comment": str},
+)
+async def tool_comment_on_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_comment_on_issue(args)
+
+
+@tool(
+    "comment_on_pr",
+    "Post a comment on a PR with agent signature",
+    {"pr_number": int, "agent_name": str, "agent_type": str, "comment": str},
+)
+async def tool_comment_on_pr(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_comment_on_pr(args)
+
+
+# ---- Label Tool Wrappers ----
+
+
+@tool(
+    "create_label",
+    "Create or update a GitHub label",
+    {"name": str, "color": str, "description": str},
+)
+async def tool_create_label(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_create_label(args)
+
+
+@tool(
+    "update_issue_labels",
+    "Add or remove labels on an issue or PR. Labels are comma-separated strings.",
+    {"issue_number": int, "add_labels": str, "remove_labels": str},
+)
+async def tool_update_issue_labels(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_update_issue_labels(args)
+
+
+# ---- Issue Tool Wrappers ----
+
+
+@tool(
+    "create_issue",
+    "Create a standalone issue. Labels is a comma-separated string.",
+    {"title": str, "body": str, "labels": str},
+)
+async def tool_create_issue(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_create_issue(args)
+
+
+@tool(
+    "list_issues",
+    "List issues filtered by labels and state. Labels is a comma-separated string.",
+    {"labels": str, "state": str},
+)
+async def tool_list_issues(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_list_issues(args)
+
+
+@tool(
+    "list_open_prs",
+    "List all open pull requests in the repository",
+    {},
+)
+async def tool_list_open_prs(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_list_open_prs(args)
+
+
+# ---- Activity Tool Wrappers ----
 
 
 @tool(
@@ -792,11 +1346,26 @@ def create_orchestrator_server(
             # PR tools
             tool_get_pr_status,
             tool_list_my_prs,
+            tool_list_my_reviews,
             tool_list_prs_for_review,
             tool_claim_pr_review,
             tool_request_changes,
             tool_mark_feedback_addressed,
             tool_approve_pr,
+            tool_get_pr_feedback,
+            tool_get_pr_diff,
+            tool_create_pr,
+            tool_merge_pr,
+            # Comment tools
+            tool_comment_on_issue,
+            tool_comment_on_pr,
+            # Label tools
+            tool_create_label,
+            tool_update_issue_labels,
+            # Issue tools
+            tool_create_issue,
+            tool_list_issues,
+            tool_list_open_prs,
             # Activity tools
             tool_log_activity,
             tool_get_activity_log,

@@ -18,10 +18,11 @@ import pytest
 import pytest_asyncio
 
 from softfoundry.mcp.github_client import GitHubClient
+from softfoundry.mcp.constants import DEFAULT_GITHUB_REPO
 from softfoundry.mcp import orchestrator
 
 # Integration test repository
-INTEGRATION_TEST_REPO = "rafidka/softfoundry-integ-tests"
+INTEGRATION_TEST_REPO = DEFAULT_GITHUB_REPO
 
 
 # =============================================================================
@@ -288,7 +289,7 @@ class TestEpicTools:
         assert data["number"] == sub_number
         assert data["title"] == "Test sub-issue"
         assert data["priority"] == "high"
-        assert data["status"] == "pending"
+        assert data["sf_status"] == "pending"
         assert data["assignee"] is None
 
     async def test_get_sub_issue_not_found(self, fresh_epic, setup_orchestrator):
@@ -537,7 +538,7 @@ class TestEpicTools:
         )
         sub_data = parse_response(sub_response)
         assert sub_data["assignee"] == "test-agent"
-        assert sub_data["status"] == "in-progress"
+        assert sub_data["sf_status"] == "in-progress"
 
     async def test_claim_sub_issue_already_assigned(
         self, fresh_epic, setup_orchestrator
@@ -608,7 +609,7 @@ class TestEpicTools:
                 {"epic_number": epic_number, "sub_issue_number": sub_number}
             )
             sub_data = parse_response(sub_response)
-            assert sub_data["status"] == status
+            assert sub_data["sf_status"] == status
 
     async def test_update_sub_issue_status_invalid(
         self, fresh_epic, setup_orchestrator
@@ -755,17 +756,20 @@ class TestPRTools:
     async def test_request_changes_adds_label(
         self, client, fresh_pr, setup_orchestrator
     ):
-        """request_changes adds feedback-requested label.
-
-        Note: GitHub doesn't allow requesting changes on your own PR, so we test
-        just the label addition part by directly adding the label.
-        """
+        """request_changes adds feedback-requested label and posts comment."""
         pr_number = fresh_pr["number"]
 
-        # Directly add the label since we can't create a REQUEST_CHANGES review on our own PR
-        await client.update_issue_labels(
-            pr_number, add_labels=["status:feedback-requested"]
+        # Use the orchestrator tool (uses COMMENT event, works on self-reviews)
+        response = await orchestrator.impl_request_changes(
+            {
+                "pr_number": pr_number,
+                "comment": "Needs some fixes",
+                "agent_name": "Test Reviewer",
+                "agent_type": "reviewer",
+            }
         )
+        text = parse_response(response)
+        assert "Requested changes" in text
 
         # Verify has_feedback flag is detected
         status_response = await orchestrator.impl_get_pr_status(
@@ -774,16 +778,33 @@ class TestPRTools:
         status_data = parse_response(status_response)
         assert status_data["has_feedback"] is True
 
-    @pytest.mark.skip(reason="GitHub doesn't allow requesting changes on your own PR")
-    async def test_request_changes_creates_review(
+    async def test_request_changes_creates_comment_review(
         self, client, fresh_pr, setup_orchestrator
     ):
-        """request_changes creates a REQUEST_CHANGES review.
+        """request_changes creates a COMMENT review (not REQUEST_CHANGES).
 
-        This test is skipped because GitHub doesn't allow creating a
-        REQUEST_CHANGES review on your own pull request.
+        Since all agents share one GitHub account, we use COMMENT events
+        which work on self-reviews. Labels are the source of truth.
         """
-        pass
+        pr_number = fresh_pr["number"]
+
+        response = await orchestrator.impl_request_changes(
+            {
+                "pr_number": pr_number,
+                "comment": "Please fix the formatting",
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
+        )
+        text = parse_response(response)
+        assert "Requested changes" in text
+
+        # Verify feedback label was added
+        status_response = await orchestrator.impl_get_pr_status(
+            {"pr_number": pr_number}
+        )
+        status_data = parse_response(status_response)
+        assert status_data["has_feedback"] is True
 
     async def test_mark_feedback_addressed_removes_label(
         self, fresh_pr, setup_orchestrator
@@ -793,7 +814,12 @@ class TestPRTools:
 
         # First request changes
         await orchestrator.impl_request_changes(
-            {"pr_number": pr_number, "comment": "Fix this"}
+            {
+                "pr_number": pr_number,
+                "comment": "Fix this",
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
         )
 
         # Verify has_feedback is True
@@ -804,7 +830,12 @@ class TestPRTools:
 
         # Mark addressed
         response = await orchestrator.impl_mark_feedback_addressed(
-            {"pr_number": pr_number}
+            {
+                "pr_number": pr_number,
+                "agent_name": "Bob Smith",
+                "agent_type": "programmer",
+                "comment": "Fixed the formatting issue",
+            }
         )
         text = parse_response(response)
         assert "Marked feedback addressed" in text
@@ -815,16 +846,33 @@ class TestPRTools:
         )
         assert status2["has_feedback"] is False
 
-    @pytest.mark.skip(reason="GitHub doesn't allow approving your own PR")
-    async def test_approve_pr_creates_approval(
+    async def test_approve_pr_adds_label_and_comment(
         self, client, fresh_pr, setup_orchestrator
     ):
-        """approve_pr creates an APPROVE review.
+        """approve_pr adds approved label and posts comment.
 
-        This test is skipped because GitHub doesn't allow approving
-        your own pull request.
+        Uses COMMENT event (not APPROVE) since all agents share one
+        GitHub account. The status:approved label is the source of truth.
         """
-        pass
+        pr_number = fresh_pr["number"]
+
+        response = await orchestrator.impl_approve_pr(
+            {
+                "pr_number": pr_number,
+                "comment": "Looks good to me!",
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
+        )
+        text = parse_response(response)
+        assert "Approved" in text
+
+        # Verify approved label was added
+        status_response = await orchestrator.impl_get_pr_status(
+            {"pr_number": pr_number}
+        )
+        status_data = parse_response(status_response)
+        assert status_data["is_approved"] is True
 
     async def test_list_my_prs(self, client, fresh_pr, setup_orchestrator):
         """list_my_prs returns PRs assigned to author via assignee:* label."""
@@ -1084,7 +1132,7 @@ class TestSubIssueLifecycle:
                 {"epic_number": epic_number, "sub_issue_number": sub_number}
             )
         )
-        assert sub_status["status"] == "in-progress"
+        assert sub_status["sf_status"] == "in-progress"
         assert sub_status["assignee"] == "alice-chen"
 
         # Step 7: Update status to in-review (simulating PR creation)
@@ -1102,7 +1150,7 @@ class TestSubIssueLifecycle:
                 {"epic_number": epic_number, "sub_issue_number": sub_number}
             )
         )
-        assert sub_status["status"] == "in-review"
+        assert sub_status["sf_status"] == "in-review"
 
 
 # =============================================================================
@@ -1145,11 +1193,14 @@ class TestPRReviewLifecycle:
         )
         assert not any(pr["number"] == pr_number for pr in available)
 
-        # Step 5: Simulate request changes by adding feedback label
-        # Note: GitHub doesn't allow reviewing your own PR, so we simulate
-        # the feedback workflow by directly manipulating labels
-        await client.update_issue_labels(
-            pr_number, add_labels=["status:feedback-requested"]
+        # Step 5: Request changes via orchestrator (uses COMMENT event, works on self-reviews)
+        await orchestrator.impl_request_changes(
+            {
+                "pr_number": pr_number,
+                "comment": "Please fix the formatting",
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
         )
 
         # Step 6: Verify has_feedback=true
@@ -1159,7 +1210,14 @@ class TestPRReviewLifecycle:
         assert status["has_feedback"] is True
 
         # Step 7: Mark feedback addressed
-        await orchestrator.impl_mark_feedback_addressed({"pr_number": pr_number})
+        await orchestrator.impl_mark_feedback_addressed(
+            {
+                "pr_number": pr_number,
+                "agent_name": "Bob Smith",
+                "agent_type": "programmer",
+                "comment": "Fixed the formatting",
+            }
+        )
 
         # Step 8: Verify has_feedback=false
         status = parse_response(
@@ -1167,9 +1225,21 @@ class TestPRReviewLifecycle:
         )
         assert status["has_feedback"] is False
 
-        # Note: Steps 9-10 (approve PR) are skipped because GitHub doesn't
-        # allow approving your own PR. The approval workflow is tested via
-        # unit tests with mocked responses.
+        # Step 9: Approve PR (uses COMMENT event + label, works on self-reviews)
+        await orchestrator.impl_approve_pr(
+            {
+                "pr_number": pr_number,
+                "comment": "Looks good now!",
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
+        )
+
+        # Step 10: Verify is_approved=true
+        status = parse_response(
+            await orchestrator.impl_get_pr_status({"pr_number": pr_number})
+        )
+        assert status["is_approved"] is True
 
 
 # =============================================================================
@@ -1430,7 +1500,12 @@ class TestEndToEndWorkflow:
 
             # Request changes
             await orchestrator.impl_request_changes(
-                {"pr_number": pr_number, "comment": "Please add documentation"}
+                {
+                    "pr_number": pr_number,
+                    "comment": "Please add documentation",
+                    "agent_name": "Rachel Review",
+                    "agent_type": "reviewer",
+                }
             )
 
             await orchestrator.impl_log_activity(
@@ -1454,7 +1529,14 @@ class TestEndToEndWorkflow:
             assert pr_status["has_feedback"] is True
 
             # Address feedback and mark addressed
-            await orchestrator.impl_mark_feedback_addressed({"pr_number": pr_number})
+            await orchestrator.impl_mark_feedback_addressed(
+                {
+                    "pr_number": pr_number,
+                    "agent_name": "Bob Smith",
+                    "agent_type": "programmer",
+                    "comment": "Added documentation as requested",
+                }
+            )
 
             await orchestrator.impl_log_activity(
                 {

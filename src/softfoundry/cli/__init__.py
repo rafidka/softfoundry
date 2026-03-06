@@ -2,7 +2,7 @@
 
 import typer
 
-from softfoundry.cli import clear, manager, programmer, reviewer
+from softfoundry.cli import clear, debug, manager, programmer, reviewer
 
 app = typer.Typer(
     help="Multi-agent system for generating software projects end-to-end.",
@@ -13,6 +13,7 @@ manager.register_command(app)
 programmer.register_command(app)
 reviewer.register_command(app)
 clear.register_command(app)
+debug.register_command(app)
 
 if __name__ == "__main__":
     app()

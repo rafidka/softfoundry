@@ -28,9 +28,11 @@ class SubIssueStatus(BaseModel):
 
     number: int
     title: str
-    state: str  # open, closed
-    status: str | None  # pending, in-progress, in-review (from status:* label)
+    state: str  # open, closed (GitHub issue state)
+    sf_status: str | None  # softfoundry workflow status from labels:
+    # pending, in-progress, in-review. None when issue is closed.
     assignee: str | None  # from assignee:* label
+    reviewer: str | None = None  # from reviewer:* label on the linked PR
     priority: str | None  # high, medium, low (from priority:* label)
     linked_pr: int | None  # PR number if one exists
     depends_on: list[int] = []  # issue numbers this task depends on

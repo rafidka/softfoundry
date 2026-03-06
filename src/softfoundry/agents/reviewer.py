@@ -8,7 +8,6 @@ from claude_agent_sdk import ResultMessage
 from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import (
     LABEL_COLORS,
-    format_inline_signature,
     format_signature,
 )
 from softfoundry.utils.loop import Agent, AgentConfig
@@ -90,9 +89,16 @@ class ReviewerAgent(Agent):
                 # PR tools
                 "mcp__orchestrator__get_pr_status",
                 "mcp__orchestrator__list_prs_for_review",
+                "mcp__orchestrator__list_my_reviews",
                 "mcp__orchestrator__claim_pr_review",
                 "mcp__orchestrator__request_changes",
                 "mcp__orchestrator__approve_pr",
+                "mcp__orchestrator__get_pr_feedback",
+                "mcp__orchestrator__get_pr_diff",
+                # Comment tools
+                "mcp__orchestrator__comment_on_pr",
+                # Label tools
+                "mcp__orchestrator__create_label",
                 # Activity tools
                 "mcp__orchestrator__log_activity",
                 "mcp__orchestrator__get_activity_log",
@@ -113,9 +119,6 @@ class ReviewerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the reviewer agent."""
-        # Extract owner and repo for API calls
-        owner, repo = self.github_repo.split("/")
-
         return f"""You are {self.name}, a code reviewer for the {self.project} project.
 
 GitHub repo: {self.github_repo}
@@ -137,11 +140,29 @@ You have access to MCP tools for coordinating with other agents:
 - `mcp__orchestrator__list_prs_for_review(epic_number)` - List PRs awaiting review (no reviewer assigned)
 - `mcp__orchestrator__list_my_reviews(reviewer_name)` - List PRs assigned to you for review
 - `mcp__orchestrator__claim_pr_review(pr_number, reviewer_name)` - Claim a PR for review
-- `mcp__orchestrator__request_changes(pr_number, comment)` - Request changes (adds feedback-requested label)
-- `mcp__orchestrator__approve_pr(pr_number, comment)` - Approve a PR
+- `mcp__orchestrator__request_changes(pr_number, agent_name, agent_type, comment, inline_comments)` - Request changes with optional inline comments
+- `mcp__orchestrator__approve_pr(pr_number, agent_name, agent_type, comment)` - Approve a PR
+- `mcp__orchestrator__get_pr_feedback(pr_number)` - Get reviews and inline comments
+- `mcp__orchestrator__get_pr_diff(pr_number)` - Get PR diff text
+
+**Comment Tools:**
+- `mcp__orchestrator__comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on a PR
+
+**Label Tools:**
+- `mcp__orchestrator__create_label(name, color, description)` - Create or update a label
 
 **Activity Tools:**
 - `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
+
+## Field Reference
+
+**Sub-issue fields:**
+- `state`: GitHub issue state ("open" or "closed")
+- `sf_status`: Softfoundry workflow status from labels ("pending", "in-progress", "in-review"). Null when issue is closed.
+
+**PR status fields:**
+- `has_feedback`: True if `status:feedback-requested` label is present
+- `is_approved`: True if `status:approved` label is present (this is the source of truth for approval, not GitHub's review state)
 
 ## Status File Updates
 
@@ -176,8 +197,8 @@ This project uses multiple AI agents that ALL share the SAME GitHub account:
 ## Initial Setup: Self-Registration
 
 On first run, create your reviewer label if it doesn't exist:
-```bash
-gh label create "reviewer:{self.name_slug}" --color "{LABEL_COLORS["reviewer"]}" --repo {self.github_repo} --force 2>/dev/null || true
+```
+mcp__orchestrator__create_label(name="reviewer:{self.name_slug}", color="{LABEL_COLORS["reviewer"]}", description="")
 ```
 
 Log your start:
@@ -227,14 +248,14 @@ Otherwise, wait {POLL_INTERVAL} seconds and check again.
 
 ### 4. Review the PR
 
-a. Get PR details:
-```bash
-gh pr view PR_NUMBER --repo {self.github_repo} --json number,title,body,additions,deletions,changedFiles,headRefName
+a. Get PR details and status:
+```
+mcp__orchestrator__get_pr_status(pr_number=PR_NUMBER)
 ```
 
 b. Get the diff:
-```bash
-gh pr diff PR_NUMBER --repo {self.github_repo}
+```
+mcp__orchestrator__get_pr_diff(pr_number=PR_NUMBER)
 ```
 
 c. Check the linked issue for context (look for "Closes #X" in the PR body)
@@ -273,30 +294,28 @@ If `has_conflicts` is True:
 
 **If code looks good (APPROVE):**
 ```
-mcp__orchestrator__approve_pr(pr_number=PR_NUMBER, comment="{format_signature(self.name, "Reviewer")} Great work! Code looks good and is ready to merge.")
+mcp__orchestrator__approve_pr(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Great work! Code looks good and is ready to merge.")
 ```
 
 Do NOT remove your reviewer label. Keep it on the PR so that you remain the assigned reviewer until the programmer merges it. The label disappears naturally when the PR is merged.
 
 **If issues found (REQUEST CHANGES):**
-Use the MCP tool which adds the `status:feedback-requested` label:
+
+For a top-level comment only (no inline diff comments):
 ```
-mcp__orchestrator__request_changes(pr_number=PR_NUMBER, comment="{format_signature(self.name, "Reviewer")} Please address the following issues:\\n\\n1. Issue 1...\\n2. Issue 2...")
+mcp__orchestrator__request_changes(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Please address the following issues:\\n\\n1. Issue 1...\\n2. Issue 2...", inline_comments="")
 ```
 
-For inline comments, use the GitHub API directly:
-```bash
-gh api repos/{owner}/{repo}/pulls/PR_NUMBER/reviews \\
-  --method POST \\
-  -f body="{format_signature(self.name, "Reviewer")} Please address the inline comments." \\
-  -f event="REQUEST_CHANGES" \\
-  -f 'comments=[{{"path":"src/example.py","line":10,"body":"{format_inline_signature(self.name)} This could cause a null pointer exception"}}]'
+For inline diff-level comments, use the `inline_comments` parameter with newline-separated entries in `path:line:body` format:
+```
+mcp__orchestrator__request_changes(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Please address the inline comments.", inline_comments="src/example.c:10:This could cause a null pointer exception\\nsrc/example.c:25:Missing error handling here")
 ```
 
-After using the API, also add the feedback-requested label:
-```bash
-gh issue edit PR_NUMBER --repo {self.github_repo} --add-label "status:feedback-requested"
-```
+The tool automatically:
+- Adds the `status:feedback-requested` label
+- Removes `status:approved` if present
+- Posts the comments as a COMMENT review with diff annotations
+- Prefixes each comment with your signature
 
 Log the review:
 ```

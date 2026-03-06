@@ -357,6 +357,168 @@ class GitHubClient:
             payload,
         )
 
+    async def create_pr_review_with_comments(
+        self,
+        pr_number: int,
+        body: str,
+        inline_comments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Create a COMMENT review with inline diff-level comments.
+
+        Uses event=COMMENT which works on self-reviews (unlike REQUEST_CHANGES
+        or APPROVE which GitHub rejects when reviewing your own PR).
+
+        Args:
+            pr_number: The PR number.
+            body: Top-level review body.
+            inline_comments: List of dicts with keys: path, line, body.
+
+        Returns:
+            The created review data.
+        """
+        # Get the HEAD commit SHA (required for inline comments)
+        pr = await self.get_pr(pr_number)
+        commit_id = pr["head"]["sha"]
+
+        payload: dict[str, Any] = {
+            "event": "COMMENT",
+            "body": body,
+            "commit_id": commit_id,
+            "comments": inline_comments,
+        }
+        return await self._rest_post(
+            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/reviews",
+            payload,
+        )
+
+    async def create_pull_request(
+        self,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+        labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a pull request.
+
+        Args:
+            title: PR title.
+            body: PR body/description.
+            head: The branch containing changes.
+            base: The branch to merge into (default: main).
+            labels: Labels to add to the PR.
+
+        Returns:
+            The created PR data.
+        """
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+        pr = await self._rest_post(
+            f"/repos/{self.owner}/{self.repo}/pulls",
+            payload,
+        )
+
+        # Add labels if provided (PRs use the issues API for labels)
+        if labels:
+            await self.update_issue_labels(pr["number"], add_labels=labels)
+
+        return pr
+
+    async def merge_pr(
+        self,
+        pr_number: int,
+        method: str = "squash",
+        delete_branch: bool = True,
+    ) -> dict[str, Any]:
+        """Merge a pull request.
+
+        Args:
+            pr_number: The PR number.
+            method: Merge method (merge, squash, rebase). Default: squash.
+            delete_branch: Whether to delete the head branch after merge.
+
+        Returns:
+            The merge result data.
+        """
+        result = await self._rest_put(
+            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge",
+            {"merge_method": method},
+        )
+
+        if delete_branch:
+            # Get the PR to find the head branch
+            pr = await self.get_pr(pr_number)
+            head_ref = pr["head"]["ref"]
+            try:
+                await self._rest_delete(
+                    f"/repos/{self.owner}/{self.repo}/git/refs/heads/{head_ref}"
+                )
+            except GitHubClientError:
+                # Branch may already be deleted or protected
+                pass
+
+        return result
+
+    async def get_pr_review_comments(self, pr_number: int) -> list[dict[str, Any]]:
+        """Get inline review comments on a PR (diff-level comments).
+
+        These are comments attached to specific lines in the diff,
+        distinct from issue-level comments.
+
+        Args:
+            pr_number: The PR number.
+
+        Returns:
+            List of review comment dicts with path, line, body, etc.
+        """
+        return await self._rest_get(
+            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments"
+        )
+
+    async def get_pr_diff(self, pr_number: int) -> str:
+        """Get the diff text of a pull request.
+
+        Args:
+            pr_number: The PR number.
+
+        Returns:
+            The diff as a string.
+        """
+        response = await self.client.get(
+            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}",
+            headers={"Accept": "application/vnd.github.diff"},
+        )
+        if response.status_code != 200:
+            raise GitHubClientError(
+                f"Failed to get PR diff: {response.status_code} {response.text}"
+            )
+        return response.text
+
+    async def list_issues_by_labels(
+        self,
+        labels: str,
+        state: str = "open",
+        per_page: int = 30,
+    ) -> list[dict[str, Any]]:
+        """List issues filtered by labels.
+
+        Args:
+            labels: Comma-separated label names.
+            state: Issue state (open, closed, all).
+            per_page: Results per page.
+
+        Returns:
+            List of issue dicts.
+        """
+        return await self._rest_get(
+            f"/repos/{self.owner}/{self.repo}/issues",
+            params={"labels": labels, "state": state, "per_page": per_page},
+        )
+
     # -------------------------------------------------------------------------
     # Comment Methods
     # -------------------------------------------------------------------------
@@ -383,7 +545,6 @@ class GitHubClient:
     # Label Methods
     # -------------------------------------------------------------------------
 
-    # TODO Not used. Should we remove?
     async def create_label(
         self, name: str, color: str, description: str = ""
     ) -> dict[str, Any]:
@@ -476,6 +637,9 @@ class GitHubClient:
     async def get_epic_status(self, epic_number: int) -> EpicStatus:
         """Get the status of an epic with all its sub-issues.
 
+        Cross-references open PRs to populate linked_pr and reviewer fields
+        on sub-issues.
+
         Args:
             epic_number: The epic issue number.
 
@@ -488,6 +652,30 @@ class GitHubClient:
         # Get sub-issues via GraphQL
         sub_issues_data = await self.get_sub_issues(epic_number)
 
+        # Build a map of issue_number -> (pr_number, reviewer) from open PRs
+        pr_link_map: dict[int, tuple[int, str | None]] = {}
+        try:
+            open_prs = await self.list_prs(state="open")
+            for pr in open_prs:
+                linked_issue = self._extract_linked_issue(pr.get("body"))
+                if linked_issue is not None:
+                    reviewer = self._parse_reviewer_label(pr.get("labels", []))
+                    pr_link_map[linked_issue] = (pr["number"], reviewer)
+        except GitHubClientError:
+            # If PR listing fails, continue without linked PR data
+            pass
+
+        # Also check merged/closed PRs that may have already been linked
+        try:
+            closed_prs = await self.list_prs(state="closed")
+            for pr in closed_prs:
+                linked_issue = self._extract_linked_issue(pr.get("body"))
+                if linked_issue is not None and linked_issue not in pr_link_map:
+                    reviewer = self._parse_reviewer_label(pr.get("labels", []))
+                    pr_link_map[linked_issue] = (pr["number"], reviewer)
+        except GitHubClientError:
+            pass
+
         # Convert to SubIssueStatus objects
         sub_issues = []
         completed = 0
@@ -496,22 +684,31 @@ class GitHubClient:
             status, assignee, priority, _, _ = self._parse_labels(labels)
             depends_on = self._parse_dependencies(si.get("body"))
 
-            # Check if there's a linked PR (we'd need to search PRs, skip for now)
+            state = si["state"].lower()
+
+            # Normalize sf_status: when issue is closed, ignore stale labels
+            sf_status = None if state == "closed" else status
+
+            # Look up linked PR and reviewer
             linked_pr = None
+            reviewer = None
+            if si["number"] in pr_link_map:
+                linked_pr, reviewer = pr_link_map[si["number"]]
 
             sub_issue = SubIssueStatus(
                 number=si["number"],
                 title=si["title"],
-                state=si["state"].lower(),
-                status=status,
+                state=state,
+                sf_status=sf_status,
                 assignee=assignee,
+                reviewer=reviewer,
                 priority=priority,
                 linked_pr=linked_pr,
                 depends_on=depends_on,
             )
             sub_issues.append(sub_issue)
 
-            if si["state"].lower() == "closed":
+            if state == "closed":
                 completed += 1
 
         return EpicStatus(
@@ -528,6 +725,8 @@ class GitHubClient:
         self, epic_number: int, sub_issue_number: int
     ) -> SubIssueStatus:
         """Get the status of a specific sub-issue.
+
+        Cross-references open PRs to populate linked_pr and reviewer.
 
         Args:
             epic_number: The parent epic issue number.
@@ -548,14 +747,37 @@ class GitHubClient:
                 status, assignee, priority, _, _ = self._parse_labels(labels)
                 depends_on = self._parse_dependencies(si.get("body"))
 
+                state = si["state"].lower()
+                sf_status = None if state == "closed" else status
+
+                # Look up linked PR and reviewer
+                linked_pr = None
+                reviewer = None
+                try:
+                    for pr_state in ("open", "closed"):
+                        prs = await self.list_prs(state=pr_state)
+                        for pr in prs:
+                            linked = self._extract_linked_issue(pr.get("body"))
+                            if linked == sub_issue_number:
+                                linked_pr = pr["number"]
+                                reviewer = self._parse_reviewer_label(
+                                    pr.get("labels", [])
+                                )
+                                break
+                        if linked_pr is not None:
+                            break
+                except GitHubClientError:
+                    pass
+
                 return SubIssueStatus(
                     number=si["number"],
                     title=si["title"],
-                    state=si["state"].lower(),
-                    status=status,
+                    state=state,
+                    sf_status=sf_status,
                     assignee=assignee,
+                    reviewer=reviewer,
                     priority=priority,
-                    linked_pr=None,
+                    linked_pr=linked_pr,
                     depends_on=depends_on,
                 )
 

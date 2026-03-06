@@ -10,11 +10,12 @@ Test organization:
 import pytest
 import pytest_asyncio
 
+from softfoundry.mcp.constants import DEFAULT_GITHUB_REPO
 from softfoundry.mcp.github_client import GitHubClient, GitHubClientError
 from softfoundry.mcp.types import EpicStatus, PRStatus, SubIssueStatus
 
 # Integration test repository
-INTEGRATION_TEST_REPO = "rafidka/softfoundry-integ-tests"
+INTEGRATION_TEST_REPO = DEFAULT_GITHUB_REPO
 
 
 # -----------------------------------------------------------------------------
@@ -583,7 +584,7 @@ class TestIntegration:
         # Find sub1 and check its parsed labels
         for sub in result.sub_issues:
             if sub.number == sub1["number"]:
-                assert sub.status == "in-progress"
+                assert sub.sf_status == "in-progress"
                 assert sub.priority == "high"
                 assert sub.assignee == "test-user"
 
@@ -617,7 +618,7 @@ class TestIntegration:
 
         assert isinstance(result, SubIssueStatus)
         assert result.number == sub["number"]
-        assert result.status == "pending"
+        assert result.sf_status == "pending"
         assert result.state == "open"
 
     async def test_get_sub_issue_status_not_found(self, real_client):
