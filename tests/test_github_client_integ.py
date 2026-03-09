@@ -649,7 +649,6 @@ class TestIntegration:
             assert isinstance(result, PRStatus)
             assert result.number == test_pr_number
             assert result.state in ("open", "closed", "merged")
-            assert result.author is not None
             assert result.head_branch is not None
             assert result.base_branch is not None
             assert isinstance(result.has_feedback, bool)

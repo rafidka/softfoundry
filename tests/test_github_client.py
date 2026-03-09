@@ -869,6 +869,10 @@ class TestHighLevelMethods:
                 },
             )
         )
+        # Mock list_prs (open and closed) used to build PR-to-issue link map
+        respx.get("https://api.github.com/repos/test-owner/test-repo/pulls").mock(
+            return_value=httpx.Response(200, json=[])
+        )
 
         result = await client.get_epic_status(1)
 
@@ -926,6 +930,10 @@ class TestHighLevelMethods:
                     }
                 },
             )
+        )
+        # Mock list_prs (open and closed) used to find linked PRs
+        respx.get("https://api.github.com/repos/test-owner/test-repo/pulls").mock(
+            return_value=httpx.Response(200, json=[])
         )
 
         result = await client.get_sub_issue_status(1, 3)
