@@ -18,6 +18,11 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from pydantic import BaseModel
 
 from softfoundry.mcp.github_client import GitHubClient, GitHubClientError
+from softfoundry.utils.status import (
+    is_agent_exited,
+    is_agent_stale,
+    list_agent_statuses,
+)
 
 
 # Module-level client instance (set by create_orchestrator_server or tests)
@@ -985,6 +990,115 @@ async def impl_get_activity_log(args: dict[str, Any]) -> dict[str, Any]:
         return _error(str(e))
 
 
+# ---- Agent Health Tools ----
+
+
+async def impl_list_stale_agents(args: dict[str, Any]) -> dict[str, Any]:
+    """List non-responsive agents by scanning local status files.
+
+    An agent is considered stale if its last_update is older than 5 minutes
+    and it hasn't exited (status doesn't start with "exited:").
+
+    Returns a list of stale agent objects with their details.
+    """
+    project = args["project"]
+    statuses = list_agent_statuses(project)
+
+    stale_agents = []
+    for status_path, data in statuses:
+        # Skip agents that have already exited
+        if is_agent_exited(status_path):
+            continue
+
+        # Check if the agent is stale (no heartbeat for 5+ minutes)
+        if is_agent_stale(status_path):
+            stale_agents.append(
+                {
+                    "agent_type": data.get("agent_type", "unknown"),
+                    "name": data.get("name", "unknown"),
+                    "status": data.get("status", "unknown"),
+                    "details": data.get("details", ""),
+                    "last_update": data.get("last_update", ""),
+                    "current_issue": data.get("current_issue"),
+                    "current_pr": data.get("current_pr"),
+                    "status_file": str(status_path),
+                }
+            )
+
+    return _json_success(stale_agents)
+
+
+# ---- Unassignment Tools ----
+
+
+async def impl_unassign_programmer(args: dict[str, Any]) -> dict[str, Any]:
+    """Unassign a programmer from a sub-issue.
+
+    Removes the assignee label, resets status to pending, and posts a comment.
+    """
+    try:
+        client = _get_client()
+
+        # Get the sub-issue to find the current assignee
+        sub_issue = await client.get_sub_issue_status(
+            args["epic_number"], args["sub_issue_number"]
+        )
+
+        if sub_issue.assignee is None:
+            return _error(
+                f"Sub-issue #{args['sub_issue_number']} is not assigned to any programmer"
+            )
+
+        assignee_slug = sub_issue.assignee
+
+        # Remove assignee label and reset status to pending
+        await client.update_issue_labels(
+            args["sub_issue_number"],
+            add_labels=["status:pending"],
+            remove_labels=[f"assignee:{assignee_slug}", "status:in-progress"],
+        )
+
+        # Post a comment explaining why
+        await client.create_issue_comment(args["sub_issue_number"], args["comment"])
+
+        return _success(
+            f"Unassigned {assignee_slug} from sub-issue #{args['sub_issue_number']} "
+            f"and reset status to pending"
+        )
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
+async def impl_unassign_reviewer(args: dict[str, Any]) -> dict[str, Any]:
+    """Unassign a reviewer from a pull request.
+
+    Removes the reviewer label and posts a comment.
+    """
+    try:
+        client = _get_client()
+
+        # Get the PR to find the current reviewer
+        pr_status = await client.get_pr_status(args["pr_number"])
+
+        if pr_status.reviewer is None:
+            return _error(f"PR #{args['pr_number']} is not assigned to any reviewer")
+
+        reviewer_slug = pr_status.reviewer
+
+        # Remove reviewer label
+        await client.update_issue_labels(
+            args["pr_number"],
+            remove_labels=[f"reviewer:{reviewer_slug}"],
+        )
+
+        # Post a comment explaining why
+        await client.create_issue_comment(args["pr_number"], args["comment"])
+
+        return _success(f"Unassigned {reviewer_slug} from PR #{args['pr_number']}")
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
 # =============================================================================
 # MCP Tool Wrappers
 # =============================================================================
@@ -1298,6 +1412,39 @@ async def tool_get_activity_log(args: dict[str, Any]) -> dict[str, Any]:
     return await impl_get_activity_log(args)
 
 
+# ---- Agent Health Tool Wrappers ----
+
+
+@tool(
+    "list_stale_agents",
+    "List non-responsive agents for a project. Returns agents whose last heartbeat is older than 5 minutes and haven't exited. Each entry includes agent_type, name, status, details, last_update, current_issue, and current_pr.",
+    {"project": str},
+)
+async def tool_list_stale_agents(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_list_stale_agents(args)
+
+
+# ---- Unassignment Tool Wrappers ----
+
+
+@tool(
+    "unassign_programmer",
+    "Unassign a programmer from a sub-issue. Removes the assignee label, resets status to pending, and posts the provided comment on the issue.",
+    {"epic_number": int, "sub_issue_number": int, "comment": str},
+)
+async def tool_unassign_programmer(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_unassign_programmer(args)
+
+
+@tool(
+    "unassign_reviewer",
+    "Unassign a reviewer from a pull request. Removes the reviewer label and posts the provided comment on the PR.",
+    {"pr_number": int, "comment": str},
+)
+async def tool_unassign_reviewer(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_unassign_reviewer(args)
+
+
 # =============================================================================
 # Server Factory
 # =============================================================================
@@ -1369,5 +1516,10 @@ def create_orchestrator_server(
             # Activity tools
             tool_log_activity,
             tool_get_activity_log,
+            # Agent health tools
+            tool_list_stale_agents,
+            # Unassignment tools
+            tool_unassign_programmer,
+            tool_unassign_reviewer,
         ],
     )

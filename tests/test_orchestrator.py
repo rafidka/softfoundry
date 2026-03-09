@@ -12,6 +12,8 @@ All tests use the integration test repository and clean up after themselves.
 
 import json
 import time
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1065,6 +1067,488 @@ class TestActivityTools:
 
         # Should have at most 3 entries
         assert len(data) <= 3
+
+
+# =============================================================================
+# TestStaleAgents (Local filesystem — no GitHub API)
+# =============================================================================
+
+
+class TestStaleAgents:
+    """Tests for list_stale_agents tool.
+
+    These tests use local status files and do NOT require GitHub API access.
+    """
+
+    @pytest.fixture
+    def stale_project(self, tmp_path, monkeypatch):
+        """Create a temp status directory and patch STATUS_DIR for the test."""
+        # Patch STATUS_DIR so status utilities use our temp dir
+        monkeypatch.setattr("softfoundry.utils.status.STATUS_DIR", tmp_path)
+        # Also patch the import in the orchestrator module
+        monkeypatch.setattr(
+            "softfoundry.mcp.orchestrator.list_agent_statuses",
+            lambda prefix: _patched_list_agent_statuses(tmp_path, prefix),
+        )
+        monkeypatch.setattr(
+            "softfoundry.mcp.orchestrator.is_agent_stale",
+            lambda path: _patched_is_agent_stale(tmp_path, path),
+        )
+        monkeypatch.setattr(
+            "softfoundry.mcp.orchestrator.is_agent_exited",
+            lambda path: _patched_is_agent_exited(path),
+        )
+        project_name = "test-stale-project"
+        project_dir = tmp_path / project_name
+        project_dir.mkdir()
+        return project_name, project_dir
+
+    async def test_no_status_files(self, stale_project):
+        """list_stale_agents returns empty list when no status files exist."""
+        project_name, _ = stale_project
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+        assert data == []
+
+    async def test_no_stale_agents(self, stale_project):
+        """list_stale_agents returns empty list when all agents are fresh."""
+        project_name, project_dir = stale_project
+
+        # Create a fresh status file (last_update = now)
+        _write_status_file(
+            project_dir / "programmer-alice-chen.status",
+            agent_type="programmer",
+            name="Alice Chen",
+            status="working",
+            details="Implementing feature X",
+            current_issue=5,
+            last_update=datetime.now().isoformat(),
+        )
+
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+        assert data == []
+
+    async def test_detects_stale_agent(self, stale_project):
+        """list_stale_agents returns agents with old heartbeats."""
+        project_name, project_dir = stale_project
+
+        # Create a stale status file (last_update = 10 minutes ago)
+        stale_time = (datetime.now() - timedelta(minutes=10)).isoformat()
+        _write_status_file(
+            project_dir / "programmer-bob-smith.status",
+            agent_type="programmer",
+            name="Bob Smith",
+            status="working",
+            details="Stuck on issue #7",
+            current_issue=7,
+            current_pr=None,
+            last_update=stale_time,
+        )
+
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+
+        assert len(data) == 1
+        assert data[0]["name"] == "Bob Smith"
+        assert data[0]["agent_type"] == "programmer"
+        assert data[0]["status"] == "working"
+        assert data[0]["current_issue"] == 7
+        assert data[0]["current_pr"] is None
+
+    async def test_excludes_exited_agents(self, stale_project):
+        """list_stale_agents ignores agents that have exited."""
+        project_name, project_dir = stale_project
+
+        # Create an old but exited status file
+        stale_time = (datetime.now() - timedelta(minutes=30)).isoformat()
+        _write_status_file(
+            project_dir / "programmer-alice-chen.status",
+            agent_type="programmer",
+            name="Alice Chen",
+            status="exited:success",
+            details="Completed all work",
+            current_issue=None,
+            last_update=stale_time,
+        )
+
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+        assert data == []
+
+    async def test_mixed_fresh_stale_exited(self, stale_project):
+        """list_stale_agents correctly filters a mix of agents."""
+        project_name, project_dir = stale_project
+
+        now = datetime.now()
+        stale_time = (now - timedelta(minutes=10)).isoformat()
+        fresh_time = now.isoformat()
+
+        # Fresh agent (should NOT appear)
+        _write_status_file(
+            project_dir / "programmer-alice-chen.status",
+            agent_type="programmer",
+            name="Alice Chen",
+            status="working",
+            details="Active",
+            current_issue=1,
+            last_update=fresh_time,
+        )
+
+        # Stale agent (should appear)
+        _write_status_file(
+            project_dir / "programmer-bob-smith.status",
+            agent_type="programmer",
+            name="Bob Smith",
+            status="working",
+            details="Stuck",
+            current_issue=2,
+            last_update=stale_time,
+        )
+
+        # Exited agent (should NOT appear even though stale)
+        _write_status_file(
+            project_dir / "reviewer-carol-white.status",
+            agent_type="reviewer",
+            name="Carol White",
+            status="exited:error",
+            details="Crashed",
+            current_pr=10,
+            last_update=stale_time,
+        )
+
+        # Stale reviewer (should appear)
+        _write_status_file(
+            project_dir / "reviewer-dan-green.status",
+            agent_type="reviewer",
+            name="Dan Green",
+            status="idle",
+            details="Waiting",
+            current_pr=15,
+            last_update=stale_time,
+        )
+
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+
+        assert len(data) == 2
+        names = {agent["name"] for agent in data}
+        assert names == {"Bob Smith", "Dan Green"}
+
+    async def test_stale_agent_includes_status_file_path(self, stale_project):
+        """list_stale_agents includes the status_file path in results."""
+        project_name, project_dir = stale_project
+
+        stale_time = (datetime.now() - timedelta(minutes=10)).isoformat()
+        status_path = project_dir / "programmer-alice-chen.status"
+        _write_status_file(
+            status_path,
+            agent_type="programmer",
+            name="Alice Chen",
+            status="working",
+            details="Working on something",
+            current_issue=3,
+            last_update=stale_time,
+        )
+
+        response = await orchestrator.impl_list_stale_agents({"project": project_name})
+        data = parse_response(response)
+
+        assert len(data) == 1
+        assert data[0]["status_file"] == str(status_path)
+
+
+# Helpers for stale agent tests
+
+
+def _write_status_file(
+    path: Path,
+    agent_type: str,
+    name: str,
+    status: str,
+    details: str,
+    last_update: str,
+    current_issue: int | None = None,
+    current_pr: int | None = None,
+) -> None:
+    """Write a status file for testing."""
+    data = {
+        "agent_type": agent_type,
+        "name": name,
+        "status": status,
+        "details": details,
+        "last_update": last_update,
+        "current_issue": current_issue,
+        "current_pr": current_pr,
+        "pid": 12345,
+        "started_at": datetime.now().isoformat(),
+    }
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _patched_list_agent_statuses(
+    base_dir: Path, prefix: str
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Patched version of list_agent_statuses that uses a custom base dir."""
+    prefix_dir = base_dir / prefix
+    if not prefix_dir.exists():
+        return []
+
+    results = []
+    for status_file in prefix_dir.glob("*.status"):
+        try:
+            data = json.loads(status_file.read_text())
+            results.append((status_file, data))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return results
+
+
+def _patched_is_agent_stale(base_dir: Path, status_path: Path) -> bool:
+    """Patched version of is_agent_stale."""
+    try:
+        data = json.loads(status_path.read_text())
+        last_update = datetime.fromisoformat(data["last_update"])
+        age = (datetime.now() - last_update).total_seconds()
+        return age > 300  # 5 minutes
+    except (json.JSONDecodeError, OSError, KeyError, ValueError):
+        return True
+
+
+def _patched_is_agent_exited(status_path: Path) -> bool:
+    """Patched version of is_agent_exited."""
+    try:
+        data = json.loads(status_path.read_text())
+        return data.get("status", "").startswith("exited:")
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+# =============================================================================
+# TestUnassignProgrammer
+# =============================================================================
+
+
+@pytest.mark.slow
+class TestUnassignProgrammer:
+    """Tests for unassign_programmer tool."""
+
+    async def test_unassign_programmer(self, fresh_epic, setup_orchestrator):
+        """unassign_programmer removes assignee label and resets status."""
+        epic_number = fresh_epic["number"]
+
+        # Create and claim a sub-issue
+        result = await orchestrator.impl_create_sub_issue(
+            {
+                "epic_number": epic_number,
+                "title": "Issue to unassign",
+                "body": "Test",
+                "priority": "medium",
+            }
+        )
+        sub_number = parse_response(result)["number"]
+        fresh_epic["sub_issues"].append(sub_number)
+
+        await orchestrator.impl_claim_sub_issue(
+            {
+                "epic_number": epic_number,
+                "sub_issue_number": sub_number,
+                "agent_name": "Alice Chen",
+            }
+        )
+
+        # Verify it's assigned
+        sub_response = await orchestrator.impl_get_sub_issue(
+            {"epic_number": epic_number, "sub_issue_number": sub_number}
+        )
+        sub_data = parse_response(sub_response)
+        assert sub_data["assignee"] == "alice-chen"
+        assert sub_data["sf_status"] == "in-progress"
+
+        # Unassign
+        response = await orchestrator.impl_unassign_programmer(
+            {
+                "epic_number": epic_number,
+                "sub_issue_number": sub_number,
+                "comment": "Agent alice-chen is non-responsive. Releasing task.",
+            }
+        )
+        text = parse_response(response)
+        assert "Unassigned" in text
+        assert "alice-chen" in text
+
+        # Verify assignment removed and status reset
+        sub_response = await orchestrator.impl_get_sub_issue(
+            {"epic_number": epic_number, "sub_issue_number": sub_number}
+        )
+        sub_data = parse_response(sub_response)
+        assert sub_data["assignee"] is None
+        assert sub_data["sf_status"] == "pending"
+
+    async def test_unassign_programmer_not_assigned(
+        self, fresh_epic, setup_orchestrator
+    ):
+        """unassign_programmer fails if issue has no assignee."""
+        epic_number = fresh_epic["number"]
+
+        # Create an unassigned sub-issue
+        result = await orchestrator.impl_create_sub_issue(
+            {
+                "epic_number": epic_number,
+                "title": "Unassigned issue",
+                "body": "Test",
+                "priority": "medium",
+            }
+        )
+        sub_number = parse_response(result)["number"]
+        fresh_epic["sub_issues"].append(sub_number)
+
+        # Try to unassign
+        response = await orchestrator.impl_unassign_programmer(
+            {
+                "epic_number": epic_number,
+                "sub_issue_number": sub_number,
+                "comment": "Trying to unassign nobody.",
+            }
+        )
+        expect_error(response, "not assigned to any programmer")
+
+    async def test_unassign_programmer_makes_issue_available(
+        self, fresh_epic, setup_orchestrator
+    ):
+        """After unassigning, the issue shows up in available sub-issues."""
+        epic_number = fresh_epic["number"]
+
+        # Create and claim a sub-issue
+        result = await orchestrator.impl_create_sub_issue(
+            {
+                "epic_number": epic_number,
+                "title": "Reclaimable issue",
+                "body": "Test",
+                "priority": "medium",
+            }
+        )
+        sub_number = parse_response(result)["number"]
+        fresh_epic["sub_issues"].append(sub_number)
+
+        await orchestrator.impl_claim_sub_issue(
+            {
+                "epic_number": epic_number,
+                "sub_issue_number": sub_number,
+                "agent_name": "Bob Smith",
+            }
+        )
+
+        # Verify not available
+        avail_response = await orchestrator.impl_list_available_sub_issues(
+            {"epic_number": epic_number}
+        )
+        avail_data = parse_response(avail_response)
+        assert all(si["number"] != sub_number for si in avail_data)
+
+        # Unassign
+        await orchestrator.impl_unassign_programmer(
+            {
+                "epic_number": epic_number,
+                "sub_issue_number": sub_number,
+                "comment": "Releasing stale task.",
+            }
+        )
+
+        # Verify now available again
+        avail_response = await orchestrator.impl_list_available_sub_issues(
+            {"epic_number": epic_number}
+        )
+        avail_data = parse_response(avail_response)
+        available_numbers = [si["number"] for si in avail_data]
+        assert sub_number in available_numbers
+
+
+# =============================================================================
+# TestUnassignReviewer
+# =============================================================================
+
+
+@pytest.mark.slow
+class TestUnassignReviewer:
+    """Tests for unassign_reviewer tool."""
+
+    async def test_unassign_reviewer(self, fresh_pr, setup_orchestrator):
+        """unassign_reviewer removes reviewer label from PR."""
+        pr_number = fresh_pr["number"]
+
+        # Claim the PR for review
+        await orchestrator.impl_claim_pr_review(
+            {"pr_number": pr_number, "reviewer_name": "Rachel Review"}
+        )
+
+        # Verify reviewer is assigned
+        pr_response = await orchestrator.impl_get_pr_status({"pr_number": pr_number})
+        pr_data = parse_response(pr_response)
+        assert pr_data["reviewer"] == "rachel-review"
+
+        # Unassign reviewer
+        response = await orchestrator.impl_unassign_reviewer(
+            {
+                "pr_number": pr_number,
+                "comment": "Reviewer rachel-review is non-responsive. Releasing PR.",
+            }
+        )
+        text = parse_response(response)
+        assert "Unassigned" in text
+        assert "rachel-review" in text
+
+        # Verify reviewer removed
+        pr_response = await orchestrator.impl_get_pr_status({"pr_number": pr_number})
+        pr_data = parse_response(pr_response)
+        assert pr_data["reviewer"] is None
+
+    async def test_unassign_reviewer_not_assigned(self, fresh_pr, setup_orchestrator):
+        """unassign_reviewer fails if PR has no reviewer."""
+        pr_number = fresh_pr["number"]
+
+        response = await orchestrator.impl_unassign_reviewer(
+            {
+                "pr_number": pr_number,
+                "comment": "Trying to unassign nobody.",
+            }
+        )
+        expect_error(response, "not assigned to any reviewer")
+
+    async def test_unassign_reviewer_makes_pr_available(
+        self, fresh_pr, setup_orchestrator
+    ):
+        """After unassigning, the PR shows up in PRs available for review."""
+        pr_number = fresh_pr["number"]
+        epic_number = fresh_pr["epic_number"]
+
+        # Claim PR for review
+        await orchestrator.impl_claim_pr_review(
+            {"pr_number": pr_number, "reviewer_name": "Rachel Review"}
+        )
+
+        # Verify not available for review
+        review_response = await orchestrator.impl_list_prs_for_review(
+            {"epic_number": epic_number}
+        )
+        review_data = parse_response(review_response)
+        assert all(pr["number"] != pr_number for pr in review_data)
+
+        # Unassign reviewer
+        await orchestrator.impl_unassign_reviewer(
+            {
+                "pr_number": pr_number,
+                "comment": "Releasing PR for re-review.",
+            }
+        )
+
+        # Verify now available for review again
+        review_response = await orchestrator.impl_list_prs_for_review(
+            {"epic_number": epic_number}
+        )
+        review_data = parse_response(review_response)
+        available_numbers = [pr["number"] for pr in review_data]
+        assert pr_number in available_numbers
 
 
 # =============================================================================
