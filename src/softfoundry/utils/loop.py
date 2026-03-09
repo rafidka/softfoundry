@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from softfoundry.utils.env import get_claude_code_token
 from softfoundry.utils.interactive import InteractiveInput
 from softfoundry.utils.llm import needs_user_input
+from softfoundry.utils.memory import get_memory_path, read_memory
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.sessions import SessionManager, format_session_info
 from softfoundry.utils.status import get_status_path, read_status, update_status
@@ -98,6 +99,9 @@ class AgentConfig(BaseModel):
     # Loop behavior
     max_iterations: int = 100
 
+    # Memory
+    memory_enabled: bool = False
+
     # Session handling
     resume: bool = False
     new_session: bool = False
@@ -161,6 +165,16 @@ class Agent(ABC):
             agent_name=config.agent_name,
         )
         self.update_status("starting", "Initializing agent")
+
+        # Memory management
+        if config.memory_enabled:
+            self._memory_path = get_memory_path(
+                prefix=config.namespace,
+                agent_type=config.agent_type,
+                agent_name=config.agent_name,
+            )
+        else:
+            self._memory_path = None
 
         # Internal state
         self._iteration = 0
@@ -462,6 +476,58 @@ class Agent(ABC):
         """
         return self._printer
 
+    @property
+    def memory_path(self) -> Path | None:
+        """Access the memory file path (None if memory is disabled).
+
+        Returns:
+            Path to the memory file, or None.
+        """
+        return self._memory_path
+
+    def _build_system_prompt(self) -> str:
+        """Build the full system prompt, including memory if enabled.
+
+        Calls `get_system_prompt()` for the subclass-defined prompt, then
+        appends a memory section if memory is enabled.
+
+        Returns:
+            The complete system prompt string.
+        """
+        prompt = self.get_system_prompt()
+
+        if self._memory_path is None:
+            return prompt
+
+        memory_contents = read_memory(self._memory_path)
+
+        memory_section = f"""
+
+## Your Memory
+
+You have a persistent memory file at `{self._memory_path}`.
+Its contents persist across sessions. Use the Write and Edit tools to update it.
+
+**Guidelines:**
+- Keep it concise and organized by topic (not chronologically)
+- Record: patterns, architecture decisions, file paths, debugging insights, project conventions
+- Remove or update outdated information
+- Do NOT record session-specific context (current task, in-progress work)
+"""
+
+        if memory_contents:
+            memory_section += f"""
+**Current memory contents:**
+
+{memory_contents}"""
+        else:
+            memory_section += """
+**Current memory contents:**
+
+(empty -- this is your first session)"""
+
+        return prompt + memory_section
+
     def _get_cwd(self) -> str | None:
         """Get the resolved working directory.
 
@@ -541,7 +607,7 @@ class Agent(ABC):
             permission_mode=self.config.permission_mode,
             mcp_servers=self.config.mcp_servers if self.config.mcp_servers else {},
             resume=self._session_id,
-            system_prompt=self.get_system_prompt(),
+            system_prompt=self._build_system_prompt(),
             cwd=self._get_cwd(),
             env={
                 "ANTHROPIC_API_KEY": "",  # Empty ANTHROPIC_API_KEY to prevent SDK from using API key

@@ -20,8 +20,10 @@ The system uses an **epic-based, pull-based self-assignment model**:
 - **Reviewers** self-assign PRs to review (race-condition safe)
 - **GitHub** serves as the central coordination mechanism via labels and native sub-issues
 - **Status files** at `~/.softfoundry/agents/{project}/` enable health monitoring with heartbeats
+- **Memory files** at `~/.softfoundry/agents/{project}/` persist learnings across sessions (opt-in per agent)
 - **Sessions** at `~/.softfoundry/sessions/` enable conversation persistence and crash recovery
 - **Stale detection**: Manager releases tasks from dead agents (no heartbeat for 5+ minutes)
+- **Single-task sessions**: Programmers drive one issue to completion per session, then a Python outer loop re-launches with a fresh session for the next task
 
 ## Directory Structure
 
@@ -44,6 +46,7 @@ softfoundry/
 │       ├── interactive.py     # TUI input with prompt_toolkit
 │       ├── llm.py             # LLM utilities (question detection)
 │       ├── loop.py            # Agent loop framework (base class)
+│       ├── memory.py          # Agent memory file management
 │       ├── output.py          # Rich message formatting
 │       ├── sessions.py        # Session persistence
 │       └── status.py          # Agent status file management
@@ -62,11 +65,13 @@ softfoundry/
 │   ├── manager-{name}-{project}.json
 │   ├── programmer-{name}-{project}.json
 │   └── reviewer-{name}-{project}.json
-└── agents/                    # Agent status files
+└── agents/                    # Agent status and memory files
     └── {project}/
         ├── manager.status
         ├── programmer-{name-slug}.status
-        └── reviewer-{name-slug}.status
+        ├── programmer-{name-slug}.memory.md
+        ├── reviewer-{name-slug}.status
+        └── reviewer-{name-slug}.memory.md
 ```
 
 ## Build/Run Commands
@@ -336,6 +341,7 @@ sf reviewer \
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
 | `--epic` | GitHub issue number of the epic to work on (required) |
+| `--task-delay` | Seconds to wait between task runs (default: 60) |
 | `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 **Reviewer:**
@@ -346,6 +352,7 @@ sf reviewer \
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
 | `--epic` | GitHub issue number of the epic to work on (required) |
+| `--task-delay` | Seconds to wait between review runs (default: 60) |
 | `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 ### GitHub Label Schema
@@ -426,6 +433,10 @@ Manager agents also include:
 - `InteractiveInput` - Async input handler with prompt_toolkit
 - Status indicator in prompt (idle, waiting, working, thinking)
 - Input while agent is working interrupts the current turn
+
+**`utils/memory.py`** - Agent memory file management:
+- `get_memory_path()` - Get path to memory file
+- `read_memory()` - Read memory contents (truncated to 200 lines)
 
 **`utils/status.py`** - Agent status file management:
 - `get_status_path()` - Get path to status file

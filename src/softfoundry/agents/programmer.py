@@ -1,9 +1,17 @@
-"""Programmer agent that works on GitHub issues and creates PRs."""
+"""Programmer agent that works on GitHub issues and creates PRs.
 
+Each agent run drives a single issue to completion (claim -> implement ->
+PR -> review -> merge), then exits. A Python outer loop in run_programmer()
+handles re-launching the agent for subsequent tasks with fresh sessions.
+"""
+
+import asyncio
 import os
+import sys
 from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
+from rich.console import Console
 
 from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS, format_signature
@@ -12,17 +20,26 @@ from softfoundry.utils.status import sanitize_name
 
 AGENT_TYPE = "programmer"
 DEFAULT_MAX_ITERATIONS = 100
+DEFAULT_TASK_DELAY = 60
+
+# Exit signals the agent can output
+EXIT_TASK_COMPLETE = "exit:task_complete"
+EXIT_NO_TASKS = "exit:no_tasks"
+EXIT_ALL_DONE = "exit:all_done"
+EXIT_SIGNALS = (EXIT_TASK_COMPLETE, EXIT_NO_TASKS, EXIT_ALL_DONE)
 
 
 class ProgrammerAgent(Agent):
-    """Programmer agent that works on GitHub issues and creates PRs.
+    """Programmer agent that drives a single issue to completion.
 
     This agent:
-    1. Finds tasks assigned to it via GitHub labels
-    2. Works on tasks in a git worktree
-    3. Creates PRs for completed work
-    4. Addresses review feedback
-    5. Exits when all tasks are complete
+    1. Claims an unassigned task from the epic
+    2. Implements the task in a git worktree
+    3. Creates a PR and addresses review feedback
+    4. Merges the PR when approved
+    5. Updates its memory file and exits
+
+    The outer loop in run_programmer() handles re-launching for new tasks.
     """
 
     def __init__(
@@ -58,6 +75,7 @@ class ProgrammerAgent(Agent):
         self.project = project
         self.epic = epic
         self.worktree_path = f"{self.clone_path}-{self.name_slug}"
+        self.exit_reason: str | None = None
 
         # Determine working directory (prefer worktree if exists, then clone)
         if Path(self.worktree_path).exists():
@@ -112,6 +130,7 @@ class ProgrammerAgent(Agent):
             permission_mode="acceptEdits",
             cwd=cwd,
             max_iterations=max_iterations,
+            memory_enabled=True,
             resume=resume,
             new_session=new_session,
             verbosity=verbosity,
@@ -133,49 +152,41 @@ Status file: {self._status_path}
 Epic: #{self.epic}
 Your assignee label: assignee:{self.name_slug}
 
-## Orchestrator MCP Tools
+## MCP Tools
 
-You have access to MCP tools for coordinating with other agents. Use these instead of raw `gh` CLI commands for issue/PR management:
+You have MCP tools for coordinating with other agents. Use these instead of raw `gh` CLI commands:
 
 **Epic/Issue Tools:**
-- `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
-- `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
-- `mcp__orchestrator__list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues
-- `mcp__orchestrator__list_my_sub_issues(epic_number, agent_name)` - List your assigned sub-issues
-- `mcp__orchestrator__claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue
-- `mcp__orchestrator__update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
+- `get_epic_status(epic_number)` - Get epic with all sub-issue statuses
+- `get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+- `list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues (auto-filters by dependency)
+- `list_my_sub_issues(epic_number, agent_name)` - List your assigned sub-issues
+- `claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue
+- `update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
 
 **PR Tools:**
-- `mcp__orchestrator__get_pr_status(pr_number)` - Get PR status including `has_feedback` flag
-- `mcp__orchestrator__list_my_prs(author_name)` - List your open PRs
-- `mcp__orchestrator__mark_feedback_addressed(pr_number, agent_name, agent_type, comment)` - Mark feedback as addressed
-- `mcp__orchestrator__get_pr_feedback(pr_number)` - Get reviews and inline diff-level comments
-- `mcp__orchestrator__create_pr(title, body, head_branch, base_branch, agent_name, agent_type, labels)` - Create a PR
-- `mcp__orchestrator__merge_pr(pr_number, method, delete_branch)` - Merge a PR (method: squash/merge/rebase)
+- `get_pr_status(pr_number)` - Get PR status (`has_feedback`, `is_approved`, `has_conflicts`)
+- `list_my_prs(author_name)` - List your open PRs
+- `mark_feedback_addressed(pr_number, agent_name, agent_type, comment)` - Mark feedback addressed
+- `get_pr_feedback(pr_number)` - Get reviews and inline diff-level comments
+- `create_pr(title, body, head_branch, base_branch, agent_name, agent_type, labels)` - Create a PR
+- `merge_pr(pr_number, method, delete_branch)` - Merge a PR
 
-**Comment Tools:**
-- `mcp__orchestrator__comment_on_issue(issue_number, agent_name, agent_type, comment)` - Comment on an issue
-- `mcp__orchestrator__comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on a PR
+**Other Tools:**
+- `comment_on_issue(issue_number, agent_name, agent_type, comment)` - Comment on issue
+- `comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on PR
+- `create_label(name, color, description)` - Create or update a label
+- `log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
 
-**Label Tools:**
-- `mcp__orchestrator__create_label(name, color, description)` - Create or update a label
-
-**Activity Tools:**
-- `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
+All MCP tools are prefixed with `mcp__orchestrator__` when calling them.
 
 ## Field Reference
 
-**Sub-issue fields:**
-- `state`: GitHub issue state ("open" or "closed")
-- `sf_status`: Softfoundry workflow status from labels ("pending", "in-progress", "in-review"). Null when issue is closed.
-- `assignee`: Agent slug from assignee label
-- `reviewer`: Reviewer slug from the linked PR's reviewer label
-- `linked_pr`: PR number if a PR is linked to this issue
+**Sub-issue fields:** `state` (open/closed), `sf_status` (pending/in-progress/in-review, null when closed), `assignee` (agent slug), `reviewer` (reviewer slug), `linked_pr` (PR number).
 
-## Status File Updates
+## Status File
 
-CRITICAL: You MUST update your status file frequently using Bash:
-
+Update your status file frequently:
 ```bash
 cat > {self._status_path} << 'EOF'
 {{
@@ -192,234 +203,91 @@ cat > {self._status_path} << 'EOF'
 EOF
 ```
 
-Status values: starting, idle, working, waiting_review, addressing_feedback, exited:success, exited:error
+Status values: starting, idle, working, waiting_review, addressing_feedback, exited:success
 
-## Multi-Agent Context (IMPORTANT)
+## Multi-Agent Context
 
-This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL share the SAME GitHub account. This means:
-
-1. **All GitHub activity appears to come from the same user** - PRs, comments may be from OTHER agents.
-2. **Always identify yourself** - Include your signature in comments and PR descriptions: {format_signature(self.name, "Programmer")}
-3. **Coordinate via labels** - Use `assignee:{{slug}}` and `reviewer:{{slug}}` labels to track ownership.
-4. **Check the Author field in PRs** - PRs have `**Author:** Name (Programmer)` in the body.
-
-## Initial Setup: Self-Registration
-
-On first run, create your assignee label if it doesn't exist:
-```
-mcp__orchestrator__create_label(name="assignee:{self.name_slug}", color="{LABEL_COLORS["assignee"]}", description="")
-```
-
-Then log your start:
-```
-mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="started", message="Started and ready to work", issue_number=0, pr_number=0)
-```
+Multiple AI agents share the SAME GitHub account. Always identify yourself with your signature: {format_signature(self.name, "Programmer")}
+Coordinate via labels (`assignee:{{slug}}`, `reviewer:{{slug}}`). Check the Author field in PRs.
 
 ## Workflow
 
-### 0. Check for Existing Open PRs (IMPORTANT - Do This First!)
+### 1. Claim a Task
 
-Before looking for new tasks, check if you already have an open PR:
+Find and claim an unassigned sub-issue:
 ```
-mcp__orchestrator__list_my_prs(author_name="{self.name}")
-```
-
-**If you have an open PR:**
-- DO NOT start a new task!
-- Go to Section 7 to check on your existing PR's status
-- Wait for it to be merged or address any feedback
-- Only after ALL your PRs are merged should you find a new task
-
-**If you have NO open PRs:**
-- Continue to Section 1 to find a new task
-
-This rule is critical: **ONE active PR at a time per programmer!**
-
-### 1. Find an Unassigned Pending Sub-Issue
-
-```
-mcp__orchestrator__list_available_sub_issues(epic_number={self.epic}, priority="")
+list_available_sub_issues(epic_number={self.epic}, priority="")
+claim_sub_issue(epic_number={self.epic}, sub_issue_number=N, agent_name="{self.name}")
 ```
 
-This returns sub-issues from the epic that are unassigned and have status `pending`.
-It automatically filters out tasks whose dependencies are not yet resolved — you will only see tasks that are ready to be worked on.
-
-If no tasks are available, it may be because all remaining tasks are blocked by unresolved dependencies (other tasks that haven't been completed yet). Wait for those tasks to be completed and check again.
-
-### 2. Claim the Task
-
-When you find an unassigned task:
-
-```
-mcp__orchestrator__claim_sub_issue(epic_number={self.epic}, sub_issue_number=ISSUE_NUMBER, agent_name="{self.name}")
-```
-
-This atomically adds your assignee label and sets status to `in-progress`.
-It also validates that all task dependencies are resolved — if any dependencies are still open, the claim will be rejected with an error message listing the blocking issues.
+If no tasks are available, check the epic status. If all sub-issues are closed, exit with `exit:all_done`. Otherwise exit with `exit:no_tasks`.
 
 Log the claim:
 ```
-mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="claimed", message="Starting work on this issue", issue_number=ISSUE_NUMBER, pr_number=0)
+log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="claimed", message="Starting work on this issue", issue_number=N, pr_number=0)
 ```
 
-### 3. If No Unassigned Pending Tasks
+### 2. Set Up Worktree
 
-Check the epic status:
-```
-mcp__orchestrator__get_epic_status(epic_number={self.epic})
-```
-
-If all sub-issues are closed, exit gracefully with status "exited:success".
-If there are open issues but they're all assigned, just exit (other programmers are working on them).
-
-### 4. Start Working on the Task
-
-a. Create your worktree (if not exists):
+Create or reset your worktree:
 ```bash
 cd {self.clone_path}
 git fetch origin
+# Create worktree if needed:
 git worktree add {self.worktree_path} -b feature/issue-N-slug origin/main
-```
-
-Or if worktree exists, just create a new branch:
-```bash
+# Or if worktree exists, create new branch:
 cd {self.worktree_path}
 git fetch origin
 git checkout -b feature/issue-N-slug origin/main
 ```
 
-b. Comment on the issue (with your signature):
-```
-mcp__orchestrator__comment_on_issue(issue_number=N, agent_name="{self.name}", agent_type="programmer", comment="Starting implementation.")
-```
+Comment on the issue and update your status file with `current_issue`.
 
-c. Update your status file with current_issue
+### 3. Implement
 
-### 5. Implement the Task
-
-- Work in your worktree: {self.worktree_path}
-- Follow the project's coding standards
-- Write tests if applicable
+- Work in your worktree: `{self.worktree_path}`
+- Follow project coding standards, write tests if applicable
 - Commit frequently with clear messages
+- Update status file and log progress periodically
 
-Periodically update:
-- Log progress: `mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="progress", message="...", issue_number=N, pr_number=0)`
-- Your status file
-
-### 6. Create a PR
-
-When implementation is complete:
+### 4. Create PR
 
 ```bash
 cd {self.worktree_path}
-git add -A
-git commit -m "feat: description of changes"
-```
-
-**IMPORTANT: Rebase on latest main before pushing to avoid merge conflicts:**
-```bash
-git fetch origin
-git rebase origin/main
-```
-
-If there are conflicts during rebase, resolve them and continue.
-
-Then push:
-```bash
+git add -A && git commit -m "feat: description"
+git fetch origin && git rebase origin/main
 git push -u origin feature/issue-N-slug
 ```
 
-Create the PR with your assignee label:
+Create PR with your assignee label:
 ```
-mcp__orchestrator__create_pr(title="Title", body="## Summary\\n\\nDescription\\n\\nCloses #N", head_branch="feature/issue-N-slug", base_branch="main", agent_name="{self.name}", agent_type="programmer", labels="assignee:{self.name_slug}")
-```
-
-Update the sub-issue status:
-```
-mcp__orchestrator__update_sub_issue_status(epic_number={self.epic}, sub_issue_number=N, new_status="in-review")
+create_pr(title="Title", body="## Summary\\n\\nDescription\\n\\nCloses #N", head_branch="feature/issue-N-slug", base_branch="main", agent_name="{self.name}", agent_type="programmer", labels="assignee:{self.name_slug}")
+update_sub_issue_status(epic_number={self.epic}, sub_issue_number=N, new_status="in-review")
 ```
 
-Log the PR creation:
-```
-mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="pr_created", message="Created PR for review", issue_number=N, pr_number=PR_NUMBER)
-```
+Update status to `waiting_review`.
 
-Update your status file with current_pr and status "waiting_review".
+### 5. Handle Review
 
-### 7. Wait for Review and Handle Feedback
+Check PR status with `get_pr_status(pr_number=PR)`.
 
-Check PR status using the MCP tool:
-```
-mcp__orchestrator__get_pr_status(pr_number=PR_NUMBER)
-```
+- **Merged**: Go to step 7 (clean up)
+- **`has_feedback`**: Read feedback with `get_pr_feedback`, make fixes, commit, push, call `mark_feedback_addressed`
+- **`is_approved`**: Merge with `merge_pr(pr_number=PR, method="squash", delete_branch="true")`. If conflicts, go to step 6.
+- **`has_conflicts`**: Go to step 6
+- **Not yet reviewed**: Wait and check again
 
-This returns a JSON object with:
-- `state`: "open", "closed", or "merged"
-- `has_feedback`: True if `status:feedback-requested` label is present
-- `is_approved`: True if `status:approved` label is present
+### 6. Handle Conflicts
 
-**If PR state is "merged":**
-- Clean up and find next task (go to section 9, then section 10)
-
-**If `has_feedback` is True:**
-1. Read the review comments (both top-level reviews and inline diff comments):
-   ```
-   mcp__orchestrator__get_pr_feedback(pr_number=PR_NUMBER)
-   ```
-   This returns `reviews` (top-level review bodies) and `inline_comments` (diff-level comments with file path and line number).
-
-2. Address each piece of feedback by making the necessary code changes
-
-3. Commit and push your changes:
-   ```bash
-   git add -A
-   git commit -m "fix: address review feedback"
-   git push
-   ```
-
-4. Mark feedback as addressed:
-   ```
-   mcp__orchestrator__mark_feedback_addressed(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="programmer", comment="Addressed reviewer feedback. Ready for re-review.")
-   ```
-
-5. Log the activity:
-   ```
-   mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="feedback_addressed", message="Addressed reviewer feedback", issue_number=N, pr_number=PR_NUMBER)
-   ```
-
-6. Update status to "addressing_feedback" while working, then back to "waiting_review"
-
-**If `is_approved` is True and `has_feedback` is False:**
-- Great! Your PR has been approved. Now YOU should merge it:
-  ```
-  mcp__orchestrator__merge_pr(pr_number=PR_NUMBER, method="squash", delete_branch="true")
-  ```
-- If merge succeeds, go to Section 9 to clean up, then Section 10 to find next task
-- If merge fails due to conflicts, go to Section 8 to resolve them
-
-**If `has_conflicts` is True:**
-- Go to Section 8 to resolve conflicts immediately
-
-**If not yet reviewed (`is_approved` is False and `has_feedback` is False):**
-- Wait 30 seconds and check again
-
-### 8. Handle Conflicts
-
-If PR has conflicts:
 ```bash
 cd {self.worktree_path}
-git fetch origin
-git rebase origin/main
-# Resolve conflicts if any
+git fetch origin && git rebase origin/main
 git push --force-with-lease
 ```
 
-After resolving conflicts, add a comment:
-```
-mcp__orchestrator__comment_on_pr(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="programmer", comment="Rebased and resolved conflicts. Ready for review.")
-```
+Comment on PR that conflicts are resolved.
 
-### 9. Clean Up After Merge
+### 7. Clean Up After Merge
 
 ```bash
 cd {self.clone_path}
@@ -427,52 +295,76 @@ git worktree remove {self.worktree_path} --force
 git branch -D feature/issue-N-slug
 ```
 
-Log the merge:
-```
-mcp__orchestrator__log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="programmer", event_type="merged", message="PR merged successfully", issue_number=N, pr_number=PR_NUMBER)
-```
+Log the merge activity.
 
-### 10. Find Next Task (Loop)
+### 8. Update Memory and Exit
 
-After your PR is merged:
+After cleanup (or if no tasks were found):
 
-1. Update your status file: set `current_issue` and `current_pr` to null, status to "idle"
+1. Update your memory file with what you learned (codebase patterns, architecture, useful commands, gotchas). Keep it organized by topic, not chronologically.
 
-2. Go back to **Section 1: Find an Unassigned Pending Sub-Issue**
+2. Update your status file to `exited:success`.
 
-3. If you find a task, claim it and continue working
-
-4. If no unassigned tasks remain:
-   - Check epic status - if all complete, exit with "exited:success"
-   - If tasks are in progress by others, exit gracefully
-
-**Keep working until there are no more tasks to claim!**
+3. Output your exit signal as the very last thing in your response:
+   - `exit:task_complete` -- PR merged, task done
+   - `exit:no_tasks` -- No unassigned tasks available
+   - `exit:all_done` -- All epic sub-issues are closed
 
 ## Important Notes
 
 - Always work in your worktree, not the main clone
-- Keep your status file updated so the manager knows you're alive
-- Use the `has_feedback` flag from `get_pr_status` to detect when to address feedback
-- Log activities to keep other agents informed of your progress
-- When all tasks are done, exit with status "exited:success"
-- If you need clarification on a task, ask the user
+- Keep your status file updated (the manager monitors heartbeats)
+- One task per session -- implement, get reviewed, merge, then exit
+- When all tasks are done, exit with `exit:all_done`
 """
 
     def get_initial_prompt(self) -> str:
         """Build the first prompt, including crash-recovery context."""
         resume_context = self._get_resume_context()
-        return f"""Start working as {self.name} on the {self.project} project.
+        has_memory = self.memory_path and self.memory_path.exists()
 
-GitHub repo: {self.github_repo}
-Clone path: {self.clone_path}
-Your worktree: {self.worktree_path}
-Epic: #{self.epic}
+        parts = [
+            f"Start working as {self.name} on the {self.project} project.",
+            "",
+            f"GitHub repo: {self.github_repo}",
+            f"Clone path: {self.clone_path}",
+            f"Your worktree: {self.worktree_path}",
+            f"Epic: #{self.epic}",
+        ]
 
-{resume_context}
+        if resume_context:
+            parts.append("")
+            parts.append(resume_context)
+        else:
+            parts.append("")
+            # First check for existing open PRs
+            parts.append(
+                "First, check if you have any existing open PRs "
+                f'(`list_my_prs(author_name="{self.name}")`). '
+                "If you have an open PR, check its status and drive it to completion "
+                "(address feedback, merge when approved). "
+                "Do NOT start a new task while you have an open PR."
+            )
+            parts.append("")
+            parts.append(
+                "If you have no open PRs, find and claim a sub-issue from the epic."
+            )
 
-First, check if you have any existing open PRs. If so, check their status.
-Otherwise, find a sub-issue from the epic to work on.
-"""
+        if not has_memory:
+            parts.append("")
+            parts.append(
+                "This is your first session. "
+                f'Create your assignee label: `create_label(name="assignee:{self.name_slug}", '
+                f'color="{LABEL_COLORS["assignee"]}", description="")`'
+            )
+            parts.append(
+                f"Then log your start: `log_activity(epic_number={self.epic}, "
+                f'agent_name="{self.name}", agent_type="programmer", '
+                f'event_type="started", message="Started and ready to work", '
+                f"issue_number=0, pr_number=0)`"
+            )
+
+        return "\n".join(parts)
 
     def _get_resume_context(self) -> str:
         """Check status file for crash recovery context."""
@@ -502,12 +394,25 @@ Check the current state of issue #{issue_num} and continue from where you left o
         return ""
 
     def is_complete(self, result: ResultMessage) -> bool:
-        """Check if the programmer has finished all tasks."""
-        return result.result is not None and "exited:success" in result.result.lower()
+        """Check if the programmer has finished its task."""
+        text = (result.result or "").lower()
+        for signal in EXIT_SIGNALS:
+            if signal in text:
+                # Store the reason (e.g., "task_complete", "no_tasks", "all_done")
+                self.exit_reason = signal.split(":")[1]
+                return True
+        # Backward compatibility
+        if "exited:success" in text:
+            self.exit_reason = "success"
+            return True
+        return False
 
     def get_continuation_prompt(self) -> str:
         """Return the prompt to keep the agent working."""
-        return "Continue working. Check task status, implement, or check for review feedback."
+        return (
+            "Continue working. "
+            "Check task status, implement, or check for review feedback."
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # OPTIONAL OVERRIDES
@@ -523,13 +428,26 @@ Check the current state of issue #{issue_num} and continue from where you left o
         return None
 
     def on_complete(self) -> None:
-        """Handle completion with custom message."""
-        super().on_complete()
-        self.printer.console.print("[bold green]All tasks completed![/bold green]")
+        """Handle completion with exit-reason-specific messaging."""
+        reason = self.exit_reason or "success"
+
+        if reason == "task_complete":
+            self.update_status("exited:success", "Task completed, PR merged")
+            self.printer.console.print(
+                "[bold green]Task completed! PR merged.[/bold green]"
+            )
+        elif reason == "no_tasks":
+            self.update_status("exited:success", "No tasks available")
+            self.printer.console.print("[yellow]No tasks available to claim.[/yellow]")
+        elif reason == "all_done":
+            self.update_status("exited:success", "All epic tasks completed")
+            self.printer.console.print("[bold green]All tasks completed![/bold green]")
+        else:
+            super().on_complete()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CLI
+# OUTER LOOP
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -543,8 +461,14 @@ async def run_programmer(
     resume: bool = False,
     new_session: bool = False,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    task_delay: int = DEFAULT_TASK_DELAY,
 ) -> None:
-    """Run the programmer agent.
+    """Run the programmer agent in a loop, one task per session.
+
+    Each iteration creates a fresh ProgrammerAgent with a new Claude SDK
+    session, drives one task to completion, then re-launches for the next
+    task. The loop exits when there are no more tasks or the agent reports
+    all work is done.
 
     Args:
         name: Programmer name (e.g., "Alice Chen").
@@ -553,19 +477,56 @@ async def run_programmer(
         project: Project name.
         epic: GitHub issue number of the epic to work on.
         verbosity: Output verbosity level.
-        resume: If True, automatically resume existing session.
-        new_session: If True, always start a new session.
-        max_iterations: Maximum loop iterations (safety limit).
+        resume: If True, automatically resume existing session (first run only).
+        new_session: If True, always start a new session (first run only).
+        max_iterations: Maximum loop iterations per task (safety limit).
+        task_delay: Seconds to wait between tasks.
     """
-    agent = ProgrammerAgent(
-        name=name,
-        github_repo=github_repo,
-        clone_path=clone_path,
-        project=project,
-        epic=epic,
-        resume=resume,
-        new_session=new_session,
-        verbosity=verbosity,
-        max_iterations=max_iterations,
-    )
-    await agent.run()
+    console = Console()
+    first_run = True
+    task_number = 0
+
+    while True:
+        task_number += 1
+
+        if not first_run:
+            console.print(
+                f"\n[bold cyan]--- Starting task run #{task_number} ---[/bold cyan]\n"
+            )
+
+        agent = ProgrammerAgent(
+            name=name,
+            github_repo=github_repo,
+            clone_path=clone_path,
+            project=project,
+            epic=epic,
+            resume=resume if first_run else False,
+            new_session=new_session if first_run else True,
+            verbosity=verbosity,
+            max_iterations=max_iterations,
+        )
+
+        await agent.run()
+
+        exit_reason = agent.exit_reason
+        first_run = False
+
+        if exit_reason in ("all_done", "success"):
+            break
+
+        if exit_reason in ("task_complete", "no_tasks"):
+            console.print(
+                f"\n[dim]Waiting {task_delay}s before picking up next task...[/dim]"
+            )
+            try:
+                await asyncio.sleep(task_delay)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                console.print("\n[yellow]Interrupted during delay. Exiting.[/yellow]")
+                sys.exit(0)
+            continue
+
+        # Unknown exit reason or error — stop
+        console.print(
+            f"[yellow]Agent exited with reason: {exit_reason}. Stopping.[/yellow]"
+        )
+        break

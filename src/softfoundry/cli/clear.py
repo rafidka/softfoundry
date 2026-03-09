@@ -33,17 +33,19 @@ def _clear_all(dry_run: bool = False) -> None:
     else:
         print(f"Sessions directory does not exist: {SESSIONS_DIR}")
 
-    # Clear status files
+    # Clear status and memory files
     if STATUS_DIR.exists():
         project_dirs = [d for d in STATUS_DIR.iterdir() if d.is_dir()]
         if project_dirs:
             for project_dir in project_dirs:
                 status_files = list(project_dir.glob("*.status"))
-                if status_files:
+                memory_files = list(project_dir.glob("*.memory.md"))
+                agent_files = status_files + memory_files
+                if agent_files:
                     print(
-                        f"{prefix}Clearing {len(status_files)} status file(s) from {project_dir}"
+                        f"{prefix}Clearing {len(agent_files)} agent file(s) from {project_dir}"
                     )
-                    for f in status_files:
+                    for f in agent_files:
                         print(f"  {prefix}Removing: {f.name}")
                         if not dry_run:
                             f.unlink()
@@ -61,7 +63,7 @@ def _clear_all(dry_run: bool = False) -> None:
         print(f"Status directory does not exist: {STATUS_DIR}")
 
     if not dry_run:
-        print("\nAll sessions and status files cleared!")
+        print("\nAll sessions, status files, and memory files cleared!")
 
 
 def _clear_project(project: str, dry_run: bool = False) -> None:
@@ -87,15 +89,17 @@ def _clear_project(project: str, dry_run: bool = False) -> None:
         else:
             print(f"No session files found for project '{project}'")
 
-    # Clear status files for this project
+    # Clear status and memory files for this project
     project_status_dir = STATUS_DIR / project
     if project_status_dir.exists():
         status_files = list(project_status_dir.glob("*.status"))
-        if status_files:
+        memory_files = list(project_status_dir.glob("*.memory.md"))
+        agent_files = status_files + memory_files
+        if agent_files:
             print(
-                f"{prefix}Clearing {len(status_files)} status file(s) for project '{project}'"
+                f"{prefix}Clearing {len(agent_files)} agent file(s) for project '{project}'"
             )
-            for f in status_files:
+            for f in agent_files:
                 print(f"  {prefix}Removing: {f.name}")
                 if not dry_run:
                     f.unlink()
@@ -104,12 +108,14 @@ def _clear_project(project: str, dry_run: bool = False) -> None:
                 print(f"  {prefix}Removing empty directory: {project_status_dir.name}")
                 project_status_dir.rmdir()
         else:
-            print(f"No status files found for project '{project}'")
+            print(f"No agent files found for project '{project}'")
     else:
         print(f"No status directory found for project '{project}'")
 
     if not dry_run:
-        print(f"\nAll sessions and status files for '{project}' cleared!")
+        print(
+            f"\nAll sessions, status files, and memory files for '{project}' cleared!"
+        )
 
 
 def register_command(app: typer.Typer) -> tuple:

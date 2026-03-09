@@ -6,7 +6,11 @@ from typing import Annotated
 
 import typer
 
-from softfoundry.agents.programmer import DEFAULT_MAX_ITERATIONS, run_programmer
+from softfoundry.agents.programmer import (
+    DEFAULT_MAX_ITERATIONS,
+    DEFAULT_TASK_DELAY,
+    run_programmer,
+)
 from softfoundry.utils.env import initialize_environment
 
 
@@ -63,6 +67,10 @@ def register_command(app: typer.Typer) -> tuple:
             SessionMode,
             typer.Option(help="Session mode: auto (prompt), resume, or new"),
         ] = SessionMode.auto,
+        task_delay: Annotated[
+            int,
+            typer.Option(help="Seconds to wait between task runs (0 for no delay)"),
+        ] = DEFAULT_TASK_DELAY,
     ) -> None:
         initialize_environment()
 
@@ -82,6 +90,7 @@ def register_command(app: typer.Typer) -> tuple:
                     resume=resume,
                     new_session=new_session,
                     max_iterations=max_iterations,
+                    task_delay=task_delay,
                 )
             )
         except KeyboardInterrupt:
