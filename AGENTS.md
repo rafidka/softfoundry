@@ -14,6 +14,7 @@ This document provides instructions for AI coding agents working in this reposit
 ## Architecture
 
 The system uses an **epic-based, pull-based self-assignment model**:
+
 - **Epic**: A top-level GitHub issue representing the current body of work. All tasks are sub-issues of this epic.
 - **Manager** sets up the project, finds/creates the epic, and creates sub-issues, but does NOT assign tasks
 - **Programmers** self-assign tasks by claiming unassigned sub-issues (race-condition safe)
@@ -33,9 +34,12 @@ softfoundry/
 │   ├── __init__.py            # Package entry point
 │   ├── agents/                # Agent implementations
 │   │   ├── __init__.py
+│   │   ├── base.py            # Agent loop framework (base class)
 │   │   ├── manager.py         # Manager agent (coordinates project)
+│   │   ├── memory.py          # Agent memory file management
 │   │   ├── programmer.py      # Programmer agent (implements tasks)
-│   │   └── reviewer.py        # Reviewer agent (reviews and merges PRs)
+│   │   ├── reviewer.py        # Reviewer agent (reviews and merges PRs)
+│   │   └── sessions.py        # Session persistence
 │   ├── cli/                   # CLI commands
 │   │   ├── __init__.py
 │   │   └── clear.py           # Clear sessions and status files
@@ -45,10 +49,7 @@ softfoundry/
 │       ├── input.py           # Multi-line input handling
 │       ├── interactive.py     # TUI input with prompt_toolkit
 │       ├── llm.py             # LLM utilities (question detection)
-│       ├── loop.py            # Agent loop framework (base class)
-│       ├── memory.py          # Agent memory file management
 │       ├── output.py          # Rich message formatting
-│       ├── sessions.py        # Session persistence
 │       └── status.py          # Agent status file management
 ├── castings/                  # Generated project workspaces
 │   ├── {project}/             # Main git clone
@@ -135,6 +136,7 @@ uv run pyright
 ### Imports
 
 Order imports in three groups separated by blank lines:
+
 1. Standard library
 2. Third-party
 3. Local application
@@ -147,7 +149,7 @@ from pathlib import Path
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
 from softfoundry.utils.output import create_printer
-from softfoundry.utils.sessions import SessionManager
+from softfoundry.agents.sessions import SessionManager
 ```
 
 Use absolute imports. Avoid `from module import *`.
@@ -162,6 +164,7 @@ Use absolute imports. Avoid `from module import *`.
 ### Type Hints
 
 Always use type hints for function signatures. Use modern Python 3.12+ syntax:
+
 - `list[str]` not `List[str]`
 - `dict[str, int]` not `Dict[str, int]`
 - `str | None` not `Optional[str]`
@@ -173,13 +176,13 @@ def process_task(name: str, timeout: int = 30) -> dict[str, Any]:
 
 ### Naming Conventions
 
-| Type | Convention | Example |
-|------|------------|---------|
-| Functions/methods | snake_case | `process_message()` |
-| Variables | snake_case | `user_input` |
-| Classes | PascalCase | `AgentConfig` |
-| Constants | UPPER_SNAKE_CASE | `MAX_RETRIES` |
-| Private | Leading underscore | `_internal_helper()` |
+| Type              | Convention         | Example              |
+| ----------------- | ------------------ | -------------------- |
+| Functions/methods | snake_case         | `process_message()`  |
+| Variables         | snake_case         | `user_input`         |
+| Classes           | PascalCase         | `AgentConfig`        |
+| Constants         | UPPER_SNAKE_CASE   | `MAX_RETRIES`        |
+| Private           | Leading underscore | `_internal_helper()` |
 
 ### Error Handling
 
@@ -196,7 +199,8 @@ def process_task(name: str, timeout: int = 30) -> dict[str, Any]:
 
 ### Agent Implementation
 
-Agents extend the `Agent` abstract base class from `loop.py`, which handles:
+Agents extend the `Agent` abstract base class from `base.py`, which handles:
+
 - Session management (resume, new, interactive prompt)
 - Status file lifecycle
 - Interactive input with `prompt_toolkit`
@@ -205,8 +209,8 @@ Agents extend the `Agent` abstract base class from `loop.py`, which handles:
 ```python
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.agents.base import Agent, AgentConfig
 from softfoundry.utils.env import initialize_environment
-from softfoundry.utils.loop import Agent, AgentConfig
 
 
 class MyAgent(Agent):
@@ -359,19 +363,19 @@ sf reviewer \
 
 The manager creates these labels on project setup:
 
-| Label | Color | Purpose |
-|-------|-------|---------|
-| `type:epic` | `#5319e7` | Top-level epic issue containing sub-tasks |
-| `assignee:{name}` | `#0366d6` | Task assignment (e.g., `assignee:alice-chen`) |
-| `reviewer:{name}` | `#6f42c1` | PR reviewer assignment (e.g., `reviewer:rachel-review`) |
-| `status:pending` | `#fbca04` | Not started |
-| `status:in-progress` | `#0e8a16` | Being worked on |
-| `status:in-review` | `#6f42c1` | PR awaiting review |
-| `status:feedback-requested` | `#d73a4a` | Reviewer requested changes on PR |
-| `status:approved` | `#0e8a16` | Reviewer approved PR (ready to merge) |
-| `priority:high` | `#d73a4a` | High priority |
-| `priority:medium` | `#fbca04` | Medium priority |
-| `priority:low` | `#0e8a16` | Low priority |
+| Label                       | Color     | Purpose                                                 |
+| --------------------------- | --------- | ------------------------------------------------------- |
+| `type:epic`                 | `#5319e7` | Top-level epic issue containing sub-tasks               |
+| `assignee:{name}`           | `#0366d6` | Task assignment (e.g., `assignee:alice-chen`)           |
+| `reviewer:{name}`           | `#6f42c1` | PR reviewer assignment (e.g., `reviewer:rachel-review`) |
+| `status:pending`            | `#fbca04` | Not started                                             |
+| `status:in-progress`        | `#0e8a16` | Being worked on                                         |
+| `status:in-review`          | `#6f42c1` | PR awaiting review                                      |
+| `status:feedback-requested` | `#d73a4a` | Reviewer requested changes on PR                        |
+| `status:approved`           | `#0e8a16` | Reviewer approved PR (ready to merge)                   |
+| `priority:high`             | `#d73a4a` | High priority                                           |
+| `priority:medium`           | `#fbca04` | Medium priority                                         |
+| `priority:low`              | `#0e8a16` | Low priority                                            |
 
 ### Status File Format
 
@@ -393,6 +397,7 @@ Agents maintain status files at `~/.softfoundry/agents/{project}/`:
 ```
 
 Manager agents also include:
+
 ```json
 {
   "agent_type": "manager",
@@ -407,6 +412,7 @@ Manager agents also include:
 ```
 
 **Status values:**
+
 - `starting` - Initializing
 - `idle` - Waiting for work
 - `working` - Actively implementing
@@ -416,50 +422,61 @@ Manager agents also include:
 - `exited:error` - Crashed/errored
 - `exited:terminated` - Killed by user or manager
 
-### Utility Modules
+### Agent Modules
 
-**`utils/env.py`** - Environment variable loading:
-- `initialize_environment()` - Load .env and validate required variables
-- `get_anthropic_api_key()` - Get API key for direct Anthropic calls
-- `get_claude_code_token()` - Get OAuth token for Claude SDK
+**`agents/base.py`** - Agent loop framework:
 
-**`utils/loop.py`** - Agent loop framework:
 - `Agent` - Abstract base class for building agents
 - `AgentConfig` - Configuration dataclass for agents
 - `TurnResult` - Result of processing one agent turn
 - `extract_assistant_text()` - Extract text from AssistantMessage
 
+**`agents/memory.py`** - Agent memory file management:
+
+- `get_memory_path()` - Get path to memory file
+- `read_memory()` - Read memory contents (truncated to 200 lines)
+
+**`agents/sessions.py`** - Session persistence:
+
+- `SessionManager` - Manages session files for crash recovery
+- `SessionInfo` - Dataclass for session metadata
+- `format_session_info()` - Human-readable session display
+
+### Utility Modules
+
+**`utils/env.py`** - Environment variable loading:
+
+- `initialize_environment()` - Load .env and validate required variables
+- `get_anthropic_api_key()` - Get API key for direct Anthropic calls
+- `get_claude_code_token()` - Get OAuth token for Claude SDK
+
 **`utils/interactive.py`** - TUI input handling:
+
 - `InteractiveInput` - Async input handler with prompt_toolkit
 - Status indicator in prompt (idle, waiting, working, thinking)
 - Input while agent is working interrupts the current turn
 
-**`utils/memory.py`** - Agent memory file management:
-- `get_memory_path()` - Get path to memory file
-- `read_memory()` - Read memory contents (truncated to 200 lines)
-
 **`utils/status.py`** - Agent status file management:
+
 - `get_status_path()` - Get path to status file
 - `update_status()` - Update status with atomic writes
 - `read_status()` - Read status data
 - `is_agent_stale()` - Check if agent is unresponsive (>5 min)
 - `sanitize_name()` - Convert names to filename-safe slugs
 
-**`utils/sessions.py`** - Session persistence:
-- `SessionManager` - Manages session files for crash recovery
-- `SessionInfo` - Dataclass for session metadata
-- `format_session_info()` - Human-readable session display
-
 **`utils/output.py`** - Rich console output:
+
 - `MessagePrinter` - Prints SDK messages with configurable verbosity
 - `Verbosity` - Enum (minimal, medium, verbose)
 - `create_printer()` - Factory function
 
 **`utils/llm.py`** - LLM utilities (uses `claude-haiku-4-5`):
+
 - `needs_user_input()` - Detect if agent is asking a question
 - `extract_question()` - Extract the question from text
 
 **`utils/input.py`** - Input handling:
+
 - `read_multiline_input()` - Read multi-line user input
 
 ### MCP Orchestrator
@@ -468,7 +485,8 @@ The `mcp/` package provides an MCP server for agent coordination. All agents use
 
 **`mcp/orchestrator.py`** - MCP server with tools:
 
-*Epic/Issue Tools:*
+_Epic/Issue Tools:_
+
 - `get_epic_status(epic_number)` - Get epic with all sub-issue statuses
 - `get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
 - `list_available_sub_issues(epic_number, priority)` - List unassigned sub-issues (automatically filters out tasks with unresolved dependencies)
@@ -478,7 +496,8 @@ The `mcp/` package provides an MCP server for agent coordination. All agents use
 - `create_sub_issue(epic_number, title, body, priority, depends_on)` - Create and link sub-issue (depends_on is a comma-separated string of issue numbers, e.g. "3,5")
 - `close_epic(epic_number)` - Close the epic
 
-*PR Tools:*
+_PR Tools:_
+
 - `get_pr_status(pr_number)` - Get PR status with `has_feedback` flag
 - `list_my_prs(author_name)` - List PRs by author
 - `list_prs_for_review(epic_number)` - List PRs awaiting review
@@ -487,11 +506,13 @@ The `mcp/` package provides an MCP server for agent coordination. All agents use
 - `mark_feedback_addressed(pr_number)` - Mark feedback addressed (removes label)
 - `approve_pr(pr_number, comment)` - Approve PR
 
-*Activity Tools:*
+_Activity Tools:_
+
 - `log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity to epic
 - `get_activity_log(epic_number, limit)` - Get recent activity
 
 **`mcp/github_client.py`** - Async GitHub API client:
+
 - Uses `httpx` for async HTTP
 - Authenticates via `gh auth token`
 - REST and GraphQL API support
@@ -499,12 +520,14 @@ The `mcp/` package provides an MCP server for agent coordination. All agents use
 ### Castings Directory
 
 The `castings/` directory contains generated project workspaces:
+
 - `castings/{project}/` - Main git clone
 - `castings/{project}-{name-slug}/` - Programmer worktrees (e.g., `castings/scicalc-alice-chen/`)
 
 ## Git Conventions
 
 Use conventional commits:
+
 - `feat:` New features
 - `fix:` Bug fixes
 - `docs:` Documentation

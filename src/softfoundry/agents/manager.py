@@ -6,9 +6,9 @@ from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
 
+from softfoundry.agents.base import Agent, AgentConfig
 from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS
-from softfoundry.utils.loop import Agent, AgentConfig
 
 AGENT_TYPE = "manager"
 POLL_INTERVAL = 60  # seconds between monitoring cycles

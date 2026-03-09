@@ -172,16 +172,20 @@ uv run softfoundry-clear --dry-run
 ```
 softfoundry/
 ├── src/softfoundry/
-│   ├── agents/           # Manager, Programmer, Reviewer agents
+│   ├── agents/           # Agent implementations
+│   │   ├── base.py       # Agent loop framework (base class)
+│   │   ├── manager.py    # Manager agent (coordinates project)
+│   │   ├── memory.py     # Agent memory file management
+│   │   ├── programmer.py # Programmer agent (implements tasks)
+│   │   ├── reviewer.py   # Reviewer agent (reviews and merges PRs)
+│   │   └── sessions.py   # Session persistence
 │   ├── cli/              # CLI commands (clear)
 │   └── utils/            # Shared utilities
 │       ├── env.py        # Environment variable loading (.env)
 │       ├── input.py      # Multi-line input handling
 │       ├── interactive.py # TUI input with prompt_toolkit
 │       ├── llm.py        # Question detection using Claude Haiku
-│       ├── loop.py       # Agent loop framework (base class)
 │       ├── output.py     # Rich console formatting
-│       ├── sessions.py   # Session persistence
 │       └── status.py     # Agent status management
 ├── castings/             # Generated project workspaces
 │   ├── {project}/        # Main git clone

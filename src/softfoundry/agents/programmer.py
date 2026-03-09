@@ -13,9 +13,9 @@ from pathlib import Path
 from claude_agent_sdk import ResultMessage
 from rich.console import Console
 
+from softfoundry.agents.base import Agent, AgentConfig
 from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS, format_signature
-from softfoundry.utils.loop import Agent, AgentConfig
 from softfoundry.utils.status import sanitize_name
 
 AGENT_TYPE = "programmer"

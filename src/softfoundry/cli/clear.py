@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 from softfoundry.utils.env import initialize_environment
-from softfoundry.utils.sessions import SESSIONS_DIR
+from softfoundry.agents.sessions import SESSIONS_DIR
 from softfoundry.utils.status import STATUS_DIR
 
 

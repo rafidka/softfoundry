@@ -195,7 +195,7 @@ get_agent_pid(status_path) -> int | None
 **Atomic Writes:**
 Status updates use atomic writes (write to temp file, then rename) to prevent corruption.
 
-#### Session Management (`sessions.py`)
+#### Session Management (`agents/sessions.py`)
 
 Enables crash recovery through session persistence.
 
