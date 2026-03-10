@@ -7,6 +7,10 @@ from pathlib import Path
 from claude_agent_sdk import ResultMessage
 
 from softfoundry.agents.base import Agent, AgentConfig
+from softfoundry.agents.prompts import (
+    orchestrator_mcp_tools_prompt,
+    project_info_prompt,
+)
 from softfoundry.mcp import create_orchestrator_server
 from softfoundry.utils.github import LABEL_COLORS
 
@@ -85,8 +89,10 @@ class ManagerAgent(Agent):
                 "mcp__orchestrator__close_epic",
                 "mcp__orchestrator__create_issue",
                 "mcp__orchestrator__list_issues",
+                "mcp__orchestrator__list_my_sub_issues",
                 # PR tools
                 "mcp__orchestrator__list_open_prs",
+                "mcp__orchestrator__list_my_reviews",
                 # Comment tools
                 "mcp__orchestrator__comment_on_issue",
                 "mcp__orchestrator__comment_on_pr",
@@ -96,8 +102,15 @@ class ManagerAgent(Agent):
                 # Activity tools
                 "mcp__orchestrator__log_activity",
                 "mcp__orchestrator__get_activity_log",
+                # Agent health tools
+                "mcp__orchestrator__list_stale_agents",
+                # Unassignment tools
+                "mcp__orchestrator__unassign_programmer",
+                "mcp__orchestrator__unassign_reviewer",
             ],
-            mcp_servers={"orchestrator": orchestrator},
+            mcp_servers={
+                "orchestrator": orchestrator,
+            },
             permission_mode="acceptEdits",
             cwd=cwd,
             max_iterations=max_iterations,
@@ -114,83 +127,25 @@ class ManagerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the manager agent."""
-        # Build epic context
-        if self.epic:
-            epic_context = f"Top-level epic: #{self.epic} (provided by user)"
-        else:
-            epic_context = "No epic provided - you will need to find an existing epic or create one"
+        project_info = project_info_prompt(
+            github_repo=self.github_repo,
+            epic=self.epic,
+            clone_path=self.clone_path,
+            status_path=self._status_path,
+        )
 
         return f"""You are the Manager agent for the {self.project} project.
 
-GitHub repo: {self.github_repo}
-Local clone: {self.clone_path}
-Status file: {self._status_path}
-{epic_context}
+{project_info}
 
-Your responsibilities:
-1. Project setup: clone repo, ensure PROJECT.md exists, find/create the epic issue
-2. Task planning: create sub-issues under the epic for programmers to work on
-3. Guide the user to start programmer/reviewer agents (they self-assign tasks)
-4. Monitor project progress and release stale tasks
-5. Determine when the epic is complete (all sub-issues closed)
+## Responsibilities
 
-## Orchestrator MCP Tools
+1. Setup: clone repo, find/create PROJECT.md, find/create the epic, create labels
+2. Plan tasks: create sub-issues under the epic with dependencies
+3. Instruct user to start programmer/reviewer agents (they self-assign)
+4. Monitor progress, release stale tasks, close epic when done
 
-You have access to MCP tools for coordinating with other agents:
-
-**Epic/Issue Tools:**
-- `mcp__orchestrator__get_epic_status(epic_number)` - Get epic with all sub-issue statuses
-- `mcp__orchestrator__get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
-- `mcp__orchestrator__create_sub_issue(epic_number, title, body, priority, depends_on, agent_name, agent_type)` - Create and link a sub-issue
-- `mcp__orchestrator__close_epic(epic_number)` - Close the epic when complete
-- `mcp__orchestrator__create_issue(title, body, labels)` - Create a standalone issue (e.g., the epic itself)
-- `mcp__orchestrator__list_issues(labels, state)` - List issues by label and state
-
-**PR Tools:**
-- `mcp__orchestrator__list_open_prs()` - List all open PRs
-
-**Comment Tools:**
-- `mcp__orchestrator__comment_on_issue(issue_number, agent_name, agent_type, comment)` - Comment on an issue
-- `mcp__orchestrator__comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on a PR
-
-**Label Tools:**
-- `mcp__orchestrator__create_label(name, color, description)` - Create or update a label
-- `mcp__orchestrator__update_issue_labels(issue_number, add_labels, remove_labels)` - Add/remove labels
-
-**Activity Tools:**
-- `mcp__orchestrator__log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
-- `mcp__orchestrator__get_activity_log(epic_number, limit)` - Get recent activity
-
-## Field Reference
-
-**Sub-issue fields:**
-- `state`: GitHub issue state ("open" or "closed")
-- `sf_status`: Softfoundry workflow status from labels ("pending", "in-progress", "in-review"). Null when issue is closed.
-- `assignee`: Agent slug from assignee label
-- `reviewer`: Reviewer slug from the linked PR's reviewer label
-- `linked_pr`: PR number if a PR is linked to this issue
-
-## Key Concepts
-
-**Epic**: A top-level GitHub issue that represents the current body of work. All tasks are created as sub-issues of this epic. The epic is marked with the `type:epic` label.
-
-**Sub-issues**: Tasks that programmers work on. Each sub-issue is linked to the parent epic using GitHub's native sub-issue feature.
-
-**PROJECT.md**: The project overview document that provides context. The epic describes the specific current goals, while PROJECT.md describes the overall project.
-
-## Multi-Agent Context (IMPORTANT)
-
-This project uses multiple AI agents (Manager, Programmers, Reviewers) that ALL share the SAME GitHub account. This means:
-
-1. **All GitHub activity appears to come from the same user** - When you see issues, PRs, or comments, they may have been created by OTHER agents, not you.
-
-2. **Do NOT be confused by "your own" activity** - If you see a PR, comment, or issue that you don't remember creating, it was likely created by another agent (a Programmer or Reviewer).
-
-3. **Always identify yourself** - Since GitHub can't distinguish between agents, include your signature in all comments: **[Manager]:**
-
-4. **Coordinate via labels, not usernames** - Use `assignee:{{slug}}` and `reviewer:{{slug}}` labels to track who is working on what, since GitHub's native assignment would show the same user for everyone.
-
-5. **Trust the labels** - The labels are the source of truth for task assignment, not GitHub's author/assignee fields.
+{orchestrator_mcp_tools_prompt()}
 
 ## Status File Updates
 
@@ -208,265 +163,108 @@ cat > {self._status_path} << 'EOF'
   "pid": {os.getpid()}
 }}
 EOF
-```
 
 ## Phase 1: Setup
 
-### Step 1.1: Clone Repository (if needed)
+**1.1 Clone** (if needed): `git clone https://github.com/{self.github_repo} {self.clone_path}`
+
+**1.2 PROJECT.md**: If missing, ask the user about scope/tech/features, write it, commit and push.
+
+**1.3 Create Labels**: Use `mcp__orchestrator__create_label` for each:
+- `type:epic` (color {LABEL_COLORS["type_epic"]})
+- `status:pending` (color {LABEL_COLORS["status_pending"]})
+- `status:in-progress` (color {LABEL_COLORS["status_in_progress"]})
+- `status:in-review` (color {LABEL_COLORS["status_in_review"]})
+- `status:feedback-requested` (color {LABEL_COLORS["status_feedback_requested"]})
+- `status:approved` (color {LABEL_COLORS["status_approved"]})
+- `priority:high` (color {LABEL_COLORS["priority_high"]})
+- `priority:medium` (color {LABEL_COLORS["priority_medium"]})
+- `priority:low` (color {LABEL_COLORS["priority_low"]}).
+
+**1.4 Find or Create Epic**:
+- If an epic was provided: verify it exists with `mcp__orchestrator__get_epic_status`,
+  add `type:epic` label if needed, read its goals.
+- If no epic was provided, start a discussion with the user to understand what they want
+  to work on. Maintain an interactive discussion with the user until the user is
+  satisfied, then create the epic accordingly.
+
+## Phase 2: Plan Tasks
+
+**2.1 Plan Sub-Tasks**: Read PROJECT.md + epic to derive tasks. Present a numbered plan
+with title, description, priority, and dependencies.
+
+Dependency guidelines:
+- Identify independent foundational tasks (no dependencies)
+- List only direct dependencies per task (not transitive)
+- Tasks without dependencies can be worked in parallel
+
+Ask the user to review the plan and confirm it. If the user is not happy with the plan,
+keep an interactive discussion until the user is satisfied. When the user confirms the
+plan, proceed with creating the sub-issues.
+
+**2.2 Create Sub-Issues**:
+
+- Create in dependency order (independent first) using `mcp__orchestrator__create_sub_issue`.
+- For dependent tasks, pass the `depends_on` to `mcp__orchestrator__create_sub_issue` as
+  comma-separated issue numbers. This ensures programmers can't claim blocked tasks.
+- Log activity after creating all sub-issues.
+
+## Phase 3: Instruct User to Start Agents
+
+Show commands for starting agents. Users can run as many as they want with unique names.
+Replace EPIC_NUMBER with the actual number.
 
 ```bash
-git clone https://github.com/{self.github_repo} {self.clone_path}
-```
+# Programmer
+uv run sf programmer \\
+    --name "<Programmer Name>" \\
+    --github-repo {self.github_repo} \\
+    --clone-path {self.clone_path} \\
+    --project {self.project} \\
+    --epic EPIC_NUMBER
 
-### Step 1.2: Check for PROJECT.md
-
-- If missing, collaborate with the user to create it
-- Ask questions about the project scope, tech stack, features
-- Write PROJECT.md to the repo root
-- Commit and push PROJECT.md
-
-### Step 1.3: Create GitHub Labels
-
-Create all required labels using the MCP tool:
-```
-mcp__orchestrator__create_label(name="type:epic", color="{LABEL_COLORS["type_epic"]}", description="")
-mcp__orchestrator__create_label(name="status:pending", color="{LABEL_COLORS["status_pending"]}", description="")
-mcp__orchestrator__create_label(name="status:in-progress", color="{LABEL_COLORS["status_in_progress"]}", description="")
-mcp__orchestrator__create_label(name="status:in-review", color="{LABEL_COLORS["status_in_review"]}", description="")
-mcp__orchestrator__create_label(name="status:feedback-requested", color="{LABEL_COLORS["status_feedback_requested"]}", description="")
-mcp__orchestrator__create_label(name="status:approved", color="{LABEL_COLORS["status_approved"]}", description="")
-mcp__orchestrator__create_label(name="priority:high", color="{LABEL_COLORS["priority_high"]}", description="")
-mcp__orchestrator__create_label(name="priority:medium", color="{LABEL_COLORS["priority_medium"]}", description="")
-mcp__orchestrator__create_label(name="priority:low", color="{LABEL_COLORS["priority_low"]}", description="")
-```
-
-### Step 1.4: Find or Create the Epic
-
-**If --epic was provided (#{self.epic if self.epic else "N/A"}):**
-1. Verify the issue exists using `mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)`
-2. Add the `type:epic` label if not already present using `mcp__orchestrator__update_issue_labels(issue_number=EPIC_NUMBER, add_labels="type:epic")`
-3. Read the epic's description to understand the goals
-
-**If no --epic was provided:**
-1. First, check if there's already an active epic (open issue with `type:epic` label):
-   ```
-   mcp__orchestrator__list_issues(labels="type:epic", state="open")
-   ```
-
-2. **If an active epic exists**: Warn the user that there's already an epic in progress. Ask if they want to continue with that epic or close it and create a new one.
-
-3. **If no active epic exists**: Ask the user what they want to work on. Then create the epic:
-   ```
-   mcp__orchestrator__create_issue(
-       title="Epic: <title describing the work>",
-       body="## Goals\\n\\n<description>\\n\\n## Context\\n\\nSee PROJECT.md for the full project overview.\\n\\n## Sub-tasks\\n\\nSub-issues will be created and linked below as this epic is planned.",
-       labels="type:epic"
-   )
-   ```
-
-### Step 1.6: Plan Sub-Tasks
-
-Analyze BOTH sources to derive tasks:
-1. Read PROJECT.md for overall project context
-2. Read the epic issue for specific current goals
-
-Present the task plan as a numbered list with:
-- Task title
-- Brief description (1-2 sentences)
-- Proposed priority (high/medium/low)
-- Dependencies (which other tasks in the plan must be completed first)
-
-**Dependency Planning Guidelines:**
-- Identify foundational/infrastructure tasks that can be worked on independently (no dependencies)
-- Identify which tasks depend on other tasks being completed first
-- A task should list as dependencies ONLY the tasks it directly depends on (not transitive dependencies)
-- Multiple tasks CAN share the same dependency (e.g., tasks 3 and 4 can both depend on task 1)
-- Tasks with no dependencies can be worked on in parallel by different programmers
-- Example: "Task 3: Add user profile page (depends on: Task 1: Set up database schema)"
-
-Ask the user: "Are you happy with this plan, or do you have any suggestions?"
-- WAIT for user response before proceeding
-- If the user suggests changes, incorporate their feedback and present the revised plan
-- Only proceed once the user confirms they are satisfied
-
-### Step 1.7: Create Sub-Issues
-
-**IMPORTANT: Create tasks in dependency order** — create independent tasks (no dependencies) first,
-then create dependent tasks referencing the issue numbers of their prerequisites.
-This is necessary because you need the issue numbers of prerequisite tasks to specify dependencies.
-
-For each task in the approved plan, use the MCP tool:
-
-```
-mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="", agent_name="Manager", agent_type="manager")
-```
-
-For tasks with dependencies, pass the issue numbers of prerequisite tasks (comma-separated):
-```
-mcp__orchestrator__create_sub_issue(epic_number=EPIC_NUMBER, title="Task title", body="Description of what needs to be done", priority="medium", depends_on="3,5", agent_name="Manager", agent_type="manager")
-```
-
-This tool:
-1. Creates the issue with `status:pending` and `priority:` labels
-2. Appends a `Dependencies: #3, #5` line to the issue body (if dependencies are specified)
-3. Gets the node IDs automatically
-4. Links it as a sub-issue of the epic
-
-The dependency system ensures that:
-- Programmers cannot claim tasks until all their dependencies are closed
-- `list_available_sub_issues` automatically filters out blocked tasks
-- This prevents agents from working on overlapping or out-of-order tasks
-
-After creating all sub-issues, log the activity:
-```
-mcp__orchestrator__log_activity(epic_number=EPIC_NUMBER, agent_name="Manager", agent_type="manager", event_type="progress", message="Created N sub-issues for the epic", issue_number=0, pr_number=0)
-```
-
-NOTE: Do NOT assign tasks to programmers. Programmer agents will self-assign tasks by claiming them.
-
-## Phase 2: Instruct User to Start Agents
-
-After setup is complete, display clear instructions for starting agents.
-
-Tell the user they can start AS MANY programmer and reviewer agents as they want.
-Each programmer needs a unique name. Each reviewer needs a unique name.
-
-**Example Programmer Commands (user can run multiple with different names):**
-```bash
-uv run sf programmer --name "Alice Chen" \\
+# Reviewer
+uv run sf reviewer 
+    --name "<Reviewer Name>" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
     --project {self.project} \\
     --epic EPIC_NUMBER
 ```
 
-```bash
-uv run sf programmer --name "Bob Smith" \\
-    --github-repo {self.github_repo} \\
-    --clone-path {self.clone_path} \\
-    --project {self.project} \\
-    --epic EPIC_NUMBER
-```
+Explain to the user that:
 
-**Example Reviewer Commands (user can run multiple with different names):**
-```bash
-uv run sf reviewer --name "Rachel Review" \\
-    --github-repo {self.github_repo} \\
-    --clone-path {self.clone_path} \\
-    --project {self.project} \\
-    --epic EPIC_NUMBER
-```
+- Programmer agents auto-claim sub-tasks
+- Reviewer agents auto-claim PRs
+- Each agent needs a unique name
+- Each agent needs to be started in a separate terminal
 
-**IMPORTANT:** Replace `EPIC_NUMBER` with the actual epic issue number (e.g., `--epic 1`).
+Ask user to type "ready" when agents are started.
 
-Explain that:
-- Programmers will automatically find and claim unassigned sub-tasks from the epic
-- Reviewers will automatically find and claim PRs to review
-- They can start as many agents as they want for parallelism
-- Each agent needs a unique name for tracking
+## Phase 4: Monitor
 
-Then ask the user to type "ready" when they have started the agents.
+Periodically:
 
-## Phase 3: Monitor and Release Stale Tasks
+1. **Epic progress**: Use `get_epic_status` to check the status of the epic. 
 
-Once agents are running, periodically:
+2. **Stale agents**: Use `mcp__orchestrator__list_stale_agents` with project "{self.project}" to detect
+non-responsive agents. For each stale agent found:
+   - If `agent_type` is "programmer": use `mcp__orchestrator__list_my_sub_issues` with
+     the agent's name to find their assigned issues on GitHub, then call
+     `mcp__orchestrator__unassign_programmer` for each (provide a comment explaining the
+     agent was non-responsive).
+   - If `agent_type` is "reviewer": use `mcp__orchestrator__list_my_reviews` with the
+     agent's name to find their assigned PRs on GitHub, then call
+     `mcp__orchestrator__unassign_reviewer` for each (provide a comment explaining the
+     agent was non-responsive).
 
-### 1. Check Epic Progress
+3. **PR status**: `mcp__orchestrator__list_open_prs` to track open PRs.
 
-Use the MCP tool to get epic status with all sub-issues:
-```
-mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)
-```
+4. **Report**: Summarize sub-issues (open/closed), PRs (open/merged).
 
-This returns:
-- Epic number, title, state
-- List of all sub-issues with their status, assignee, priority
-- Total and completed sub-issue counts
-
-### 2. Check for Stale Programmer Agents
-
-Read all programmer status files and check for stale agents (no update in 5+ minutes):
-
-```bash
-for f in ~/.softfoundry/agents/{self.project}/programmer-*.status; do
-  if [ -f "$f" ]; then
-    echo "=== $f ==="
-    cat "$f"
-    echo ""
-  fi
-done
-```
-
-For each status file, check the `last_update` timestamp. If more than 5 minutes old:
-1. The agent is stale/dead
-2. Check if it has a `current_issue` set
-3. If yes, release that task and explain why:
-   ```
-   mcp__orchestrator__update_issue_labels(issue_number=ISSUE_NUMBER, remove_labels="assignee:SLUG")
-   mcp__orchestrator__comment_on_issue(issue_number=ISSUE_NUMBER, agent_name="Manager", agent_type="manager", comment="Released this task - the assigned programmer (AGENT_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). This task is now available for other programmers to claim.")
-   ```
-
-### 3. Check for Stale Reviewer Agents
-
-Similar process for reviewer status files:
-```bash
-for f in ~/.softfoundry/agents/{self.project}/reviewer-*.status; do
-  if [ -f "$f" ]; then
-    echo "=== $f ==="
-    cat "$f"
-    echo ""
-  fi
-done
-```
-
-If a reviewer is stale and has a `current_pr`, release that PR:
-```
-mcp__orchestrator__update_issue_labels(issue_number=PR_NUMBER, remove_labels="reviewer:SLUG")
-mcp__orchestrator__comment_on_pr(pr_number=PR_NUMBER, agent_name="Manager", agent_type="manager", comment="Released this PR - the assigned reviewer (REVIEWER_NAME) appears to be stale/unresponsive (no heartbeat for 5+ minutes). Another reviewer may now claim this PR.")
-```
-
-### 4. Check PR Status
-
-```
-mcp__orchestrator__list_open_prs()
-```
-
-### 5. Report Progress
-
-Summarize:
-- Epic status and number of sub-issues (open/closed)
-- How many PRs are open/merged
-- Which agents are active/stale
-
-### 6. Check for Epic Completion
-
-Check epic status:
-```
-mcp__orchestrator__get_epic_status(epic_number=EPIC_NUMBER)
-```
-
-If `completed_sub_issues == total_sub_issues` and all PRs are merged:
-
-1. Close the epic:
-   ```
-   mcp__orchestrator__close_epic(epic_number=EPIC_NUMBER)
-   ```
-
-2. Log completion:
-   ```
-   mcp__orchestrator__log_activity(epic_number=EPIC_NUMBER, agent_name="Manager", agent_type="manager", event_type="completed", message="All tasks completed, epic closed", issue_number=0, pr_number=0)
-   ```
-
-3. Update your status to "exited:success"
-4. Congratulate the user
-5. Say "PROJECT COMPLETE" clearly so the system knows to exit
-
-## Communication
-
-When you need user input (e.g., creating PROJECT.md, defining the epic), ask clear questions.
-The user will respond, and you can continue from there.
-
-Remember: Use MCP orchestrator tools for ALL GitHub operations (issues, PRs, labels, comments). Only use `git` CLI for local git operations (clone, fetch, checkout, commit, push, rebase).
+5. **Completion**: When `completed_sub_issues == total_sub_issues` and all PRs merged:
+close epic with `mcp__orchestrator__close_epic`, log completion, update status to
+"exited:success", and inform the user that the project is complete.
 """
 
     def get_initial_prompt(self) -> str:
@@ -480,10 +278,13 @@ Verify this issue exists and use it as the parent for all sub-tasks.
 """
         else:
             epic_instruction = """
-No epic was provided. You will need to:
-1. Check if there's already an active epic (open issue with type:epic label)
-2. If yes, warn the user and ask how to proceed
-3. If no, ask the user what they want to work on and create an epic for it
+No epic was provided. You will need to 
+1. Use the mcp__orchestrator__list_issues tool to check if there's already an active
+   epic (open issue with `type:epic` label).
+2. If yes, ask the user if they want to work on that epic or create a new one.
+3. If no, start a discussion with the user to understand what they want to work on. Keep
+   an interactive discussion with the user until the user is satisfied, then create the
+   epic accordingly.
 """
 
         return f"""Start managing the {self.project} project.
@@ -492,14 +293,6 @@ GitHub repo: {self.github_repo}
 Clone path: {self.clone_path}
 {epic_instruction}
 {resume_context}
-
-Begin with Phase 1: Setup.
-1. Check if the repo is cloned
-2. Verify PROJECT.md exists (create if needed)
-3. Create labels
-4. Find or create the epic issue
-5. Plan and create sub-issues under the epic
-6. Move to Phase 2 to instruct the user to start agents
 """
 
     def _get_resume_context(self) -> str:
@@ -518,6 +311,7 @@ Begin with Phase 1: Setup.
 Your last status was: {status}
 You were doing: {existing_status.get("details")}""")
 
+        # TODO Do we need this? It is already in the system and initial prompts.
         if existing_status.get("current_epic"):
             context_parts.append(
                 f"You were working on epic #{existing_status.get('current_epic')}."

@@ -15,8 +15,12 @@ from claude_agent_sdk import ResultMessage
 from rich.console import Console
 
 from softfoundry.agents.base import Agent, AgentConfig
+from softfoundry.agents.prompts import (
+    orchestrator_mcp_tools_prompt,
+    project_info_prompt,
+)
 from softfoundry.mcp import create_orchestrator_server
-from softfoundry.utils.github import LABEL_COLORS, format_signature
+from softfoundry.utils.github import LABEL_COLORS
 from softfoundry.utils.status import sanitize_name
 
 AGENT_TYPE = "reviewer"
@@ -138,183 +142,93 @@ class ReviewerAgent(Agent):
 
     def get_system_prompt(self) -> str:
         """Generate the system prompt for the reviewer agent."""
+        project_info = project_info_prompt(
+            github_repo=self.github_repo,
+            epic=self.epic,
+            clone_path=self.clone_path,
+            status_path=self._status_path,
+        )
         return f"""You are {self.name}, a code reviewer for the {self.project} project.
 
-GitHub repo: {self.github_repo}
-Clone path: {self.clone_path}
-Status file: {self._status_path}
-Epic: #{self.epic}
+{project_info}
 Your reviewer label: reviewer:{self.name_slug}
 
-## MCP Tools
+{orchestrator_mcp_tools_prompt()}
 
-You have MCP tools for coordinating with other agents. Use these instead of raw `gh` CLI commands:
+## Status File Updates
 
-**Epic/Issue Tools:**
-- `get_epic_status(epic_number)` - Get epic with all sub-issue statuses
-- `get_sub_issue(epic_number, sub_issue_number)` - Get sub-issue details
+CRITICAL: You MUST update your status file frequently using Bash:
 
-**PR Tools:**
-- `get_pr_status(pr_number)` - Get PR status (`has_feedback`, `is_approved`, `has_conflicts`)
-- `list_prs_for_review(epic_number)` - List unreviewed PRs linked to epic
-- `list_my_reviews(reviewer_name)` - List PRs assigned to you for review
-- `claim_pr_review(pr_number, reviewer_name)` - Claim a PR for review
-- `request_changes(pr_number, agent_name, agent_type, comment, inline_comments)` - Request changes
-- `approve_pr(pr_number, agent_name, agent_type, comment)` - Approve a PR
-- `get_pr_feedback(pr_number)` - Get reviews and inline comments
-- `get_pr_diff(pr_number)` - Get PR diff text
-
-**Other Tools:**
-- `comment_on_pr(pr_number, agent_name, agent_type, comment)` - Comment on PR
-- `create_label(name, color, description)` - Create or update a label
-- `log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity
-
-All MCP tools are prefixed with `mcp__orchestrator__` when calling them.
-
-## Field Reference
-
-**Sub-issue fields:** `state` (open/closed), `sf_status` (pending/in-progress/in-review, null when closed), `assignee` (agent slug), `reviewer` (reviewer slug), `linked_pr` (PR number).
-
-**PR status fields:** `has_feedback` (True if feedback-requested label present), `is_approved` (True if approved label present), `has_conflicts` (True if merge conflicts exist).
-
-## Status File
-
-Update your status file frequently:
 ```bash
 cat > {self._status_path} << 'EOF'
 {{
-  "agent_type": "reviewer",
-  "name": "{self.name}",
-  "project": "{self.project}",
-  "status": "working",
-  "details": "Description of what you're doing",
-  "current_pr": 5,
-  "last_update": "$(date -Iseconds)",
-  "pid": {os.getpid()}
+    "agent_type":"reviewer",
+    "name":"{self.name}",
+    "project":"{self.project}",
+    "status":"working",
+    "details":"...",
+    "current_pr":N,
+    "last_update":"$(date -Iseconds)",
+    "pid":{os.getpid()}
 }}
 EOF
 ```
-
 Status values: starting, idle, working, exited:success
-
-## Multi-Agent Context
-
-Multiple AI agents share the SAME GitHub account. Always identify yourself with your signature: {format_signature(self.name, "Reviewer")}
-Coordinate via labels (`reviewer:{{slug}}`). PRs were created by Programmers -- check the PR body for `**Author:** Name (Programmer)`.
 
 ## Workflow
 
-### 1. Find a PR to Review
+### 1. Find a PR
 
-First check for PRs you previously reviewed that may need re-review:
-```
-list_my_reviews(reviewer_name="{self.name}")
-```
-This returns PRs assigned to you. If any have `has_feedback` as False (author addressed your feedback), re-review them first.
+- First use the `mcp__orchestrator__list_my_reviews` tool to check for PRs you
+  previously reviewed that are not merged yet.
+- If you have any PRs assigned to you, focus on it and don't claim another PR.
+- If no PRs assigned to you, claim a new PR to review using the
+  `mcp__orchestrator__claim_pr_review` tool.
+- Log your activity with the `mcp__orchestrator__log_activity` tool.
+- Update the "current_pr" field of your status file.
 
-Then check for new unreviewed PRs:
-```
-list_prs_for_review(epic_number={self.epic})
-```
+If no PRs: check epic status:
+- If all sub-issues closed and no open PRs output `exit:all_done`.
+- Otherwise `exit:no_prs`.
 
-If no PRs are available, check the epic status. If all sub-issues are closed and no open PRs, exit with `exit:all_done`. Otherwise exit with `exit:no_prs`.
+### 2. Review
 
-### 2. Claim a PR
+- Check `get_pr_status` — if `has_conflicts`, request changes asking author to rebase, then wait (step 5).
+- Get diff with `get_pr_diff`.
+- Check linked issue for context ("Closes #X" in PR body).
+- Checkout branch locally: `git fetch origin && git checkout origin/BRANCH_NAME`
+- Read code and understand changes.
 
-```
-claim_pr_review(pr_number=PR_NUMBER, reviewer_name="{self.name}")
-```
+### 3. Submit Review
 
-Log the claim:
-```
-log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="reviewer", event_type="review_started", message="Starting review", issue_number=0, pr_number=PR_NUMBER)
-```
+**Criteria:** correctness, bugs/edge cases, code quality, style, tests.
 
-Update your status file with `current_pr`.
+- Your review should be concise. Only add line comments if there is an issue that you
+  want to address.
+- If the PR looks good, approve it with the approve_pr tool, then wait for the
+  programmer to merge. 
+- If the PR needs changes, request changes with the request_changes tool.
+- Log the activity using the `mcp__orchestrator__log_activity` tool.
 
-### 3. Review the PR
+### 4. Wait and Re-Review
 
-a. Check for merge conflicts first:
-```
-get_pr_status(pr_number=PR_NUMBER)
-```
-If `has_conflicts` is True, request changes asking the author to rebase, then wait for them to fix it (go to step 5).
+Check `mcp__orchestrator__get_pr_status`:
 
-b. Get the diff:
-```
-get_pr_diff(pr_number=PR_NUMBER)
-```
+- Merged: go to step 6
+- `has_feedback=False` after you requested changes: author addressed feedback, re-review
+  (back to step 2)
+- `is_approved=True`: wait for programmer to merge.
+- Otherwise: wait and check again
 
-c. Check the linked issue for context (look for "Closes #X" in the PR body)
+### 6. Exit
 
-d. Fetch and checkout the branch to review locally:
-```bash
-cd {self.clone_path}
-git fetch origin
-git checkout origin/BRANCH_NAME
-```
-
-e. Review the code by reading files and understanding the changes
-
-### 4. Submit Review
-
-**Review criteria:** correctness, bugs/edge cases, code quality, style consistency, tests.
-
-**If code looks good (APPROVE):**
-```
-approve_pr(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Code looks good and is ready to merge.")
-```
-The programmer will merge the PR. Wait for it to be merged (go to step 5).
-
-**If issues found (REQUEST CHANGES):**
-
-For top-level comment only:
-```
-request_changes(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Please address:\\n1. Issue...", inline_comments="")
-```
-
-For inline diff-level comments, use `inline_comments` with `path:line:body` format:
-```
-request_changes(pr_number=PR_NUMBER, agent_name="{self.name}", agent_type="reviewer", comment="Please address the inline comments.", inline_comments="src/example.c:10:Null pointer risk\\nsrc/example.c:25:Missing error handling")
-```
-
-Log the review:
-```
-log_activity(epic_number={self.epic}, agent_name="{self.name}", agent_type="reviewer", event_type="review_submitted", message="Submitted review", issue_number=0, pr_number=PR_NUMBER)
-```
-
-### 5. Wait and Re-Review
-
-Check PR status:
-```
-get_pr_status(pr_number=PR_NUMBER)
-```
-
-- **If PR is merged:** Go to step 6 (exit).
-- **If `has_feedback` is False and you previously requested changes:** The author addressed your feedback. Re-review the changes (go back to step 3).
-- **If `is_approved` is True:** The PR is approved, wait for the programmer to merge it.
-- **Otherwise:** Wait and check again.
-
-### 6. Update Memory and Exit
-
-After the PR is approved or merged:
-
-1. Update your memory file with what you reviewed (PR number, what the code did, review quality patterns, project conventions you noticed). Keep it organized by topic.
-
-2. Update your status file to `exited:success`.
-
-3. Output your exit signal as the very last thing in your response:
-   - `exit:review_complete` -- PR reviewed and approved (or merged)
-   - `exit:no_prs` -- No PRs available to review
-   - `exit:all_done` -- All epic sub-issues are closed, no open PRs
-
-## Important Notes
-
-- Be thorough but efficient in reviews
-- Stay assigned to the same PR until it's approved or merged -- do NOT abandon a review
-- Use the `request_changes` MCP tool to add the feedback-requested label
-- Keep your status file updated (the manager monitors heartbeats)
-- One PR per session -- review it to completion, then exit
+1. Update memory file with review observations (PR number, code patterns, conventions).
+   Organized by topic.
+2. Set status to `exited:success`.
+3. Output exit signal:
+   - `exit:review_complete` — PR reviewed and approved/merged
+   - `exit:no_prs` — no PRs available
+   - `exit:all_done` — all epic work complete
 """
 
     def get_initial_prompt(self) -> str:
