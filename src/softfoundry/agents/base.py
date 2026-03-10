@@ -109,6 +109,9 @@ class AgentConfig(BaseModel):
     # Output
     verbosity: str = "medium"
 
+    # Dry mode (skip mutations like session resolution and status writes)
+    dry_mode: bool = False
+
 
 class Agent(ABC):
     """Abstract base class for building interactive agentic loops.
@@ -156,7 +159,8 @@ class Agent(ABC):
         # Session management
         self._session_manager = SessionManager(prefix=config.namespace)
         self._session_id: str | None = None
-        self._resolve_session()
+        if not config.dry_mode:
+            self._resolve_session()
 
         # Status management
         self._status_path = get_status_path(
@@ -164,7 +168,8 @@ class Agent(ABC):
             agent_type=config.agent_type,
             agent_name=config.agent_name,
         )
-        self.update_status("starting", "Initializing agent")
+        if not config.dry_mode:
+            self.update_status("starting", "Initializing agent")
 
         # Memory management
         if config.memory_enabled:

@@ -61,6 +61,13 @@ def register_command(app: typer.Typer) -> tuple:
             SessionMode,
             typer.Option(help="Session mode: auto (prompt), resume, or new"),
         ] = SessionMode.auto,
+        print_prompts_and_exit: Annotated[
+            bool,
+            typer.Option(
+                "--print-prompts-and-exit",
+                help="Print system and initial prompts, then exit without running the agent",
+            ),
+        ] = False,
     ) -> None:
         initialize_environment()
 
@@ -78,6 +85,7 @@ def register_command(app: typer.Typer) -> tuple:
                     resume=resume,
                     new_session=new_session,
                     max_iterations=max_iterations,
+                    print_prompts_and_exit=print_prompts_and_exit,
                 )
             )
         except KeyboardInterrupt:

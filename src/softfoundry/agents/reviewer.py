@@ -54,6 +54,7 @@ class ReviewerAgent(Agent):
         new_session: bool = False,
         verbosity: str = "medium",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        dry_mode: bool = False,
     ):
         """Initialize the reviewer agent.
 
@@ -67,6 +68,7 @@ class ReviewerAgent(Agent):
             new_session: If True, force a new session.
             verbosity: Output verbosity level.
             max_iterations: Maximum loop iterations.
+            dry_mode: If True, skip session resolution and status file writes.
         """
         # Store agent-specific state
         self.name = name
@@ -126,6 +128,7 @@ class ReviewerAgent(Agent):
             resume=resume,
             new_session=new_session,
             verbosity=verbosity,
+            dry_mode=dry_mode,
         )
         super().__init__(config)
 
@@ -448,6 +451,7 @@ async def run_reviewer(
     new_session: bool = False,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     task_delay: int = DEFAULT_TASK_DELAY,
+    print_prompts_and_exit: bool = False,
 ) -> None:
     """Run the reviewer agent in a loop, one PR per session.
 
@@ -467,7 +471,23 @@ async def run_reviewer(
         new_session: If True, always start a new session (first run only).
         max_iterations: Maximum loop iterations per PR (safety limit).
         task_delay: Seconds to wait between review runs.
+        print_prompts_and_exit: If True, print prompts and exit without running.
     """
+    if print_prompts_and_exit:
+        agent = ReviewerAgent(
+            name=name,
+            github_repo=github_repo,
+            clone_path=clone_path,
+            project=project,
+            epic=epic,
+            dry_mode=True,
+        )
+        print("=== SYSTEM PROMPT ===\n")
+        print(agent.get_system_prompt())
+        print("\n=== INITIAL PROMPT ===\n")
+        print(agent.get_initial_prompt())
+        return
+
     console = Console()
     first_run = True
     run_number = 0

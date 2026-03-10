@@ -36,6 +36,7 @@ class ManagerAgent(Agent):
         new_session: bool = False,
         verbosity: str = "medium",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
+        dry_mode: bool = False,
     ):
         """Initialize the manager agent.
 
@@ -48,6 +49,7 @@ class ManagerAgent(Agent):
             new_session: If True, force a new session.
             verbosity: Output verbosity level.
             max_iterations: Maximum loop iterations.
+            dry_mode: If True, skip session resolution and status file writes.
         """
         # Store agent-specific state
         self.github_repo = github_repo
@@ -102,6 +104,7 @@ class ManagerAgent(Agent):
             resume=resume,
             new_session=new_session,
             verbosity=verbosity,
+            dry_mode=dry_mode,
         )
         super().__init__(config)
 
@@ -565,6 +568,7 @@ async def run_manager(
     resume: bool = False,
     new_session: bool = False,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    print_prompts_and_exit: bool = False,
 ) -> None:
     """Run the manager agent.
 
@@ -576,6 +580,7 @@ async def run_manager(
         resume: If True, automatically resume existing session.
         new_session: If True, always start a new session.
         max_iterations: Maximum loop iterations (safety limit).
+        print_prompts_and_exit: If True, print prompts and exit without running.
     """
     # Prompt for required values if not provided
     if not github_repo:
@@ -590,6 +595,20 @@ async def run_manager(
     # Default clone path
     if not clone_path:
         clone_path = f"castings/{project}"
+
+    if print_prompts_and_exit:
+        agent = ManagerAgent(
+            github_repo=github_repo,
+            clone_path=clone_path,
+            project=project,
+            epic=epic,
+            dry_mode=True,
+        )
+        print("=== SYSTEM PROMPT ===\n")
+        print(agent.get_system_prompt())
+        print("\n=== INITIAL PROMPT ===\n")
+        print(agent.get_initial_prompt())
+        return
 
     agent = ManagerAgent(
         github_repo=github_repo,

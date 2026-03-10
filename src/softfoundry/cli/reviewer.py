@@ -71,6 +71,13 @@ def register_command(app: typer.Typer) -> tuple:
             int,
             typer.Option(help="Seconds to wait between review runs (0 for no delay)"),
         ] = DEFAULT_TASK_DELAY,
+        print_prompts_and_exit: Annotated[
+            bool,
+            typer.Option(
+                "--print-prompts-and-exit",
+                help="Print system and initial prompts, then exit without running the agent",
+            ),
+        ] = False,
     ) -> None:
         initialize_environment()
 
@@ -91,6 +98,7 @@ def register_command(app: typer.Typer) -> tuple:
                     new_session=new_session,
                     max_iterations=max_iterations,
                     task_delay=task_delay,
+                    print_prompts_and_exit=print_prompts_and_exit,
                 )
             )
         except KeyboardInterrupt:
