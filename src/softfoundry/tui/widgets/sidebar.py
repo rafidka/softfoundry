@@ -225,10 +225,10 @@ class KeyBindingsSection(Static):
         bindings = [
             ("Ctrl+B", "Sidebar"),
             ("Ctrl+D", "Exit"),
-            ("Enter", "Send"),
             ("Ctrl+J", "Newline"),
-            ("PgUp/Dn", "Scroll"),
             ("End", "Jump to end"),
+            ("Enter", "Send"),
+            ("PgUp/Dn", "Scroll"),
         ]
         lines = ["[bold dim]Keys[/bold dim]"]
         for key, desc in bindings:

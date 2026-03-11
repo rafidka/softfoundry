@@ -94,12 +94,9 @@ async with ClaudeSDKClient(options=options) as client:
     while iteration < max_iterations:
         async for message in client.receive_response():
             # Process messages
-        if needs_user_input(last_assistant_text):
-            user_input = read_multiline_input()
-            await client.query(user_input)
-        else:
-            await asyncio.sleep(POLL_INTERVAL)
-            await client.query("Continue monitoring...")
+        # User questions are handled by ask_user MCP tool (blocks turn)
+        # Between turns: check for pending input, idle wait, or continue
+        await client.query(continuation_prompt)
 ```
 
 #### Programmer Agent (`programmer.py`)
@@ -240,21 +237,19 @@ Handles all SDK message types:
 - `SystemMessage` - System events
 - `ResultMessage` - Completion with cost/usage
 
-#### LLM Utilities (`llm.py`)
+#### User Interaction (`mcp/user_server.py`)
 
-Uses Claude (Haiku) for classification tasks.
+Provides MCP tools for explicit user interaction, auto-injected by `base.py`:
 
 ```python
-CLASSIFICATION_MODEL = "claude-3-5-haiku-latest"
+ask_user(question: str) -> str
+    """Ask the user a free-text question, blocks until response."""
 
-def needs_user_input(text: str) -> bool
-    """Detect if text asks a question requiring user input."""
-
-def extract_question(text: str) -> str | None
-    """Extract the main question from text."""
+ask_user_choice(question: str, options: list[str]) -> str
+    """Present choices, user selects by number or types custom answer."""
 ```
 
-This enables agents to determine when to wait for user input vs. continue autonomously.
+Tools block Claude's turn (await asyncio.Event) until the user responds via the TUI.
 
 #### Input Handling (`input.py`)
 
@@ -342,12 +337,9 @@ async def run_agent(...):
                 if isinstance(message, ResultMessage):
                     session_manager.save_session(...)
             
-            if needs_user_input(last_text):
-                user_input = read_multiline_input()
-                await client.query(user_input)
-            else:
-                await asyncio.sleep(POLL_INTERVAL)
-                await client.query("Continue...")
+            # User questions handled by ask_user MCP tool (blocks turn)
+            # Between turns: check pending input, idle wait, or continue
+            await client.query("Continue...")
 ```
 
 ### Signal Handling
@@ -565,25 +557,28 @@ Agents don't communicate directly. All coordination happens through:
 
 ### User Interaction
 
-The manager handles user interaction:
+All agents use `ask_user` MCP tools for explicit user interaction:
 
 ```
-┌─────────────────────────────────────────────┐
-│           USER INTERACTION                   │
-├─────────────────────────────────────────────┤
-│                                              │
-│  Claude's Response                           │
-│       │                                      │
-│       ▼                                      │
-│  needs_user_input(text) ──► LLM classifier  │
-│       │                                      │
-│       ├─► YES: Wait for user input          │
-│       │        read_multiline_input()        │
-│       │        Send response to Claude       │
-│       │                                      │
-│       └─► NO: Continue autonomously          │
-│               Sleep, then poll               │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│           USER INTERACTION                    │
+├──────────────────────────────────────────────┤
+│                                               │
+│  Claude needs user input                      │
+│       │                                       │
+│       ▼                                       │
+│  Calls ask_user / ask_user_choice MCP tool    │
+│       │                                       │
+│       ▼                                       │
+│  Tool displays question in TUI                │
+│  Input area enters "Answer >" mode            │
+│  Tool awaits asyncio.Event                    │
+│       │                                       │
+│       ▼                                       │
+│  User types answer, presses Enter             │
+│  Tool returns answer as tool result           │
+│  Claude continues with the answer             │
+└──────────────────────────────────────────────┘
 ```
 
 ---

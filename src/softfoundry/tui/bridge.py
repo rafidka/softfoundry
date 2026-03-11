@@ -1,8 +1,8 @@
 """Bridge between the Agent base class and the Textual TUI.
 
-AgentBridge adapts the Agent's expected interfaces (InteractiveInput-like
-and MessagePrinter-like) into Textual app method calls. It translates
-claude_agent_sdk message types into TUI widget updates.
+AgentBridge adapts the Agent's expected interfaces into Textual app method
+calls. It translates claude_agent_sdk message types into TUI widget updates
+and provides methods for question display (used by the ask_user MCP tools).
 
 The bridge uses `app.call_from_thread()` when called from a worker thread,
 or direct method calls when on the main thread.
@@ -31,11 +31,11 @@ from softfoundry.tui.widgets.sidebar import EpicIssue
 class AgentBridge:
     """Bridges the Agent loop and the Textual TUI.
 
-    Provides two interfaces:
-    1. InteractiveInput-compatible: status, enable, disable, stop
+    Provides:
+    1. Input control: status, enable, disable, stop
     2. MessagePrinter-compatible: print_message()
-
-    Also provides methods for question handling and sidebar updates.
+    3. Question display: show_question(), clear_question() (used by ask_user tools)
+    4. Sidebar updates: session info, task info, epic progress
 
     All TUI mutations go through the app's thread-safe call mechanisms.
     """
@@ -51,7 +51,7 @@ class AgentBridge:
         # Track verbosity (for filtering)
         self._verbosity = "medium"
 
-    # ─── InteractiveInput-compatible interface ───────────────────────────────
+    # ─── Input control interface ────────────────────────────────────────────
 
     @property
     def status(self) -> str:

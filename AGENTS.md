@@ -9,7 +9,7 @@ This document provides instructions for AI coding agents working in this reposit
 - **Package Manager**: uv (https://docs.astral.sh/uv/)
 - **Python Version**: 3.12+
 - **Source Layout**: `src/softfoundry/`
-- **Dependencies**: `claude-agent-sdk`, `anthropic`, `rich`, `prompt-toolkit`, `python-dotenv`
+- **Dependencies**: `claude-agent-sdk`, `anthropic`, `rich`, `textual`, `python-dotenv`
 
 ## Architecture
 
@@ -43,12 +43,30 @@ softfoundry/
 │   ├── cli/                   # CLI commands
 │   │   ├── __init__.py
 │   │   └── clear.py           # Clear sessions and status files
+│   ├── mcp/                   # MCP servers
+│   │   ├── __init__.py
+│   │   ├── github_client.py   # Async GitHub API client
+│   │   ├── orchestrator.py    # GitHub coordination MCP server
+│   │   ├── user_server.py     # User interaction MCP server (ask_user)
+│   │   ├── constants.py       # Shared constants
+│   │   └── types.py           # Shared types
+│   ├── tui/                   # Textual TUI
+│   │   ├── __init__.py
+│   │   ├── app.py             # Main Textual App
+│   │   ├── bridge.py          # Agent-to-TUI bridge
+│   │   ├── styles/app.tcss    # TUI stylesheet
+│   │   └── widgets/           # TUI widget components
+│   │       ├── __init__.py
+│   │       ├── input_area.py  # Input area with question mode
+│   │       ├── message_blocks.py  # Message display widgets
+│   │       ├── message_stream.py  # Scrollable message stream
+│   │       ├── sidebar.py     # Status/info sidebar
+│   │       └── status_bar.py  # Bottom status bar
 │   └── utils/                 # Shared utilities
 │       ├── __init__.py
 │       ├── env.py             # Environment variable loading (.env)
 │       ├── input.py           # Multi-line input handling
-│       ├── interactive.py     # TUI input with prompt_toolkit
-│       ├── llm.py             # LLM utilities (question detection)
+│       ├── llm.py             # LLM utilities
 │       ├── output.py          # Rich message formatting
 │       └── status.py          # Agent status file management
 ├── castings/                  # Generated project workspaces
@@ -203,8 +221,9 @@ Agents extend the `Agent` abstract base class from `base.py`, which handles:
 
 - Session management (resume, new, interactive prompt)
 - Status file lifecycle
-- Interactive input with `prompt_toolkit`
-- The main agent loop with user interaction detection
+- Textual TUI with split-pane layout
+- User interaction via `ask_user` MCP tools (auto-injected)
+- The main agent loop
 
 ```python
 from claude_agent_sdk import ResultMessage
@@ -258,10 +277,6 @@ Agents can override these methods for customization:
 def get_idle_interval(self) -> int | None:
     """Seconds to wait before continuation (for polling)."""
     return 30  # or None for immediate continuation
-
-def needs_user_input(self, text: str) -> bool:
-    """Override to customize user input detection."""
-    return needs_user_input(text)  # Default uses LLM classifier
 
 def on_assistant_message(self, message: AssistantMessage, text: str) -> None:
     """Hook called when assistant sends a message."""
@@ -450,12 +465,6 @@ Manager agents also include:
 - `get_anthropic_api_key()` - Get API key for direct Anthropic calls
 - `get_claude_code_token()` - Get OAuth token for Claude SDK
 
-**`utils/interactive.py`** - TUI input handling:
-
-- `InteractiveInput` - Async input handler with prompt_toolkit
-- Status indicator in prompt (idle, waiting, working, thinking)
-- Input while agent is working interrupts the current turn
-
 **`utils/status.py`** - Agent status file management:
 
 - `get_status_path()` - Get path to status file
@@ -470,18 +479,26 @@ Manager agents also include:
 - `Verbosity` - Enum (minimal, medium, verbose)
 - `create_printer()` - Factory function
 
-**`utils/llm.py`** - LLM utilities (uses `claude-haiku-4-5`):
+**`utils/llm.py`** - LLM utilities:
 
-- `needs_user_input()` - Detect if agent is asking a question
-- `extract_question()` - Extract the question from text
+- Reserved for future LLM utility functions
 
 **`utils/input.py`** - Input handling:
 
 - `read_multiline_input()` - Read multi-line user input
 
-### MCP Orchestrator
+### MCP Servers
 
-The `mcp/` package provides an MCP server for agent coordination. All agents use this server instead of raw `gh` CLI commands for GitHub coordination.
+The `mcp/` package provides MCP servers used by all agents:
+- **orchestrator** — GitHub coordination (issues, PRs, labels, activity)
+- **user** — User interaction tools (auto-injected by `base.py`)
+
+**`mcp/user_server.py`** - User interaction MCP server:
+
+- `ask_user(question)` - Ask the user a free-text question and wait for their response
+- `ask_user_choice(question, options)` - Present choices to the user (they can select by number or type a custom answer)
+- Auto-injected into all agents by `base.py` — no manual setup needed
+- Tools block Claude's turn (await asyncio.Event) until the user responds via the TUI
 
 **`mcp/orchestrator.py`** - MCP server with tools:
 

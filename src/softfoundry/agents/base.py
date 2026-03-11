@@ -3,7 +3,7 @@
 This module provides the `Agent` abstract base class that handles:
 - Session management (resume, new, interactive prompt)
 - Status file lifecycle (starting, exited:*)
-- The main agent loop with user interaction detection
+- The main agent loop with TUI-based user interaction
 
 Subclasses implement agent-specific logic via abstract methods.
 """
@@ -25,9 +25,9 @@ from pydantic import BaseModel, Field
 
 from softfoundry.agents.memory import get_memory_path, read_memory
 from softfoundry.agents.sessions import SessionManager, format_session_info
+from softfoundry.mcp.user_server import UserInputServer, create_user_server
 from softfoundry.tui import AgentBridge, SoftFoundryApp
 from softfoundry.utils.env import get_claude_code_token
-from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.status import get_status_path, read_status, update_status
 
@@ -118,7 +118,8 @@ class Agent(ABC):
     This class handles the common infrastructure for running an agent:
     - Session management (resume, new, interactive prompt)
     - Status file lifecycle (starting, exited:*)
-    - The main agent loop with user interaction detection
+    - The main agent loop with TUI-based user interaction
+    - User input via ask_user MCP tools (auto-injected)
 
     Subclasses implement the agent-specific logic via abstract methods:
     - `get_system_prompt()`: Define the agent's personality and instructions
@@ -188,6 +189,9 @@ class Agent(ABC):
         self._bridge: AgentBridge | None = None
         self._app: SoftFoundryApp | None = None
         self._client: ClaudeSDKClient | None = None
+
+        # User input MCP server (auto-injected in run())
+        self._user_server: UserInputServer | None = None
 
         # User input handling (no queue - just a single pending input slot)
         self._pending_input: str | None = None
@@ -385,22 +389,6 @@ class Agent(ABC):
         """
         return None
 
-    def needs_user_input(self, text: str) -> bool:
-        """Determine if the agent's response requires user input.
-
-        Default implementation uses an LLM to classify whether the text
-        contains a question that needs user input.
-
-        Override this method to customize user input detection.
-
-        Args:
-            text: The agent's last response text.
-
-        Returns:
-            True if user input is needed, False otherwise.
-        """
-        return needs_user_input(text)
-
     def on_assistant_message(self, message: AssistantMessage, text: str) -> None:
         """Hook called when the assistant sends a message.
 
@@ -493,15 +481,25 @@ class Agent(ABC):
         return self._memory_path
 
     def _build_system_prompt(self) -> str:
-        """Build the full system prompt, including memory if enabled.
+        """Build the full system prompt, including user interaction and memory.
 
         Calls `get_system_prompt()` for the subclass-defined prompt, then
-        appends a memory section if memory is enabled.
+        appends instructions for ask_user tools and memory section if enabled.
 
         Returns:
             The complete system prompt string.
         """
         prompt = self.get_system_prompt()
+
+        # Add ask_user instructions
+        prompt += """
+
+## User Interaction
+
+When you need to ask the user a question, get clarification, or need them to make a decision, \
+use the `ask_user` or `ask_user_choice` tool instead of writing the question in your text response. \
+These tools will display the question in the TUI and wait for the user's answer, which is returned \
+as the tool result. Do NOT ask questions in plain text — the user cannot respond to those."""
 
         if self._memory_path is None:
             return prompt
@@ -555,12 +553,18 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         """Handle user input from the TUI.
 
         This is called by the Textual app when the user submits input.
-        The agent decides whether to interrupt the current turn or just
-        store the input for later processing.
+        Routes input to the ask_user tool if it's waiting, otherwise
+        treats it as an interrupt or stores it for later processing.
 
         Args:
             text: The user's input text.
         """
+        # If ask_user tool is waiting for a response, route input there
+        if self._user_server and self._user_server.is_waiting:
+            self._user_server.provide_response(text)
+            return
+
+        # Otherwise, standard behavior: store as pending input
         self._pending_input = text
 
         if self._is_turn_running and self._client:
@@ -588,17 +592,28 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         """Main entry point - runs the agent loop via the Textual TUI.
 
         This method:
-        1. Builds the Claude SDK options
-        2. Creates the Textual TUI app and bridge
-        3. Runs the agent loop as a Textual worker inside the app
-        4. The TUI handles all input/output
+        1. Creates the user input MCP server and injects it into config
+        2. Builds the Claude SDK options
+        3. Creates the Textual TUI app and bridge
+        4. Connects the user server to the bridge
+        5. Runs the agent loop as a Textual worker inside the app
 
         Press Ctrl+D to exit at any time.
 
         Raises:
             Exception: Re-raises any exception after calling on_error().
         """
-        # Build Claude SDK options
+        # Create user input MCP server (ask_user / ask_user_choice tools)
+        user_server_config, self._user_server = create_user_server(name="user")
+        self.config.mcp_servers["user"] = user_server_config
+        self.config.allowed_tools.extend(
+            [
+                "mcp__user__ask_user",
+                "mcp__user__ask_user_choice",
+            ]
+        )
+
+        # Build Claude SDK options (includes injected user server)
         options = self._build_sdk_options()
 
         # Store options for the worker to use
@@ -617,6 +632,9 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         # Create the bridge (adapter between agent and TUI)
         self._bridge = AgentBridge(app=self._app)
         self._bridge._verbosity = self.config.verbosity
+
+        # Connect user server to bridge so it can display questions in TUI
+        self._user_server.set_bridge(self._bridge)
 
         # Replace the printer with the bridge (it implements print_message)
         # The bridge's console property provides backward compatibility
@@ -787,6 +805,10 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     async def _get_next_prompt(self, was_interrupted: bool) -> str | None:
         """Determine the next prompt to send to the agent.
 
+        User questions are handled by the ask_user MCP tool (which blocks
+        Claude's turn until the user responds), so this method no longer
+        needs LLM-based question detection.
+
         Args:
             was_interrupted: Whether the previous turn was interrupted.
 
@@ -801,10 +823,6 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             self._pending_input = None
             return prompt
 
-        # Check if the agent is asking a question
-        if self.needs_user_input(self._last_assistant_text):
-            return await self._wait_for_user_input()
-
         # Check if we should wait before continuing
         idle_interval = self.get_idle_interval()
         if idle_interval is not None and idle_interval > 0:
@@ -814,40 +832,6 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         # Return continuation prompt
         return self.get_continuation_prompt()
-
-    async def _wait_for_user_input(self) -> str | None:
-        """Wait for user input when the agent asks a question.
-
-        Activates question mode in the TUI so the input area shows
-        "Answer >" instead of ">" — signaling the user that the agent
-        is waiting for their response.
-
-        Returns:
-            The user's input, or None if interrupted.
-        """
-        assert self._bridge is not None
-
-        self._bridge.status = "waiting"
-
-        # Enter question mode on the TUI input area
-        try:
-            self._bridge._call_on_app("set_question_mode", True)
-        except Exception:
-            pass
-
-        try:
-            while True:
-                if self._pending_input is not None:
-                    prompt = self._pending_input
-                    self._pending_input = None
-                    return prompt
-                await asyncio.sleep(0.1)
-        finally:
-            # Exit question mode
-            try:
-                self._bridge._call_on_app("set_question_mode", False)
-            except Exception:
-                pass
 
     async def _wait_idle(self, interval: int) -> str | None:
         """Wait for the idle interval, checking for user input.

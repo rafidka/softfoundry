@@ -180,11 +180,17 @@ softfoundry/
 │   │   ├── reviewer.py   # Reviewer agent (reviews and merges PRs)
 │   │   └── sessions.py   # Session persistence
 │   ├── cli/              # CLI commands (clear)
+│   ├── mcp/              # MCP servers
+│   │   ├── orchestrator.py # GitHub coordination
+│   │   └── user_server.py  # User interaction (ask_user)
+│   ├── tui/              # Textual TUI
+│   │   ├── app.py        # Main Textual App
+│   │   ├── bridge.py     # Agent-to-TUI bridge
+│   │   └── widgets/      # TUI widget components
 │   └── utils/            # Shared utilities
 │       ├── env.py        # Environment variable loading (.env)
 │       ├── input.py      # Multi-line input handling
-│       ├── interactive.py # TUI input with prompt_toolkit
-│       ├── llm.py        # Question detection using Claude Haiku
+│       ├── llm.py        # LLM utilities
 │       ├── output.py     # Rich console formatting
 │       └── status.py     # Agent status management
 ├── castings/             # Generated project workspaces
@@ -263,7 +269,7 @@ softfoundry uses a `.env` file for API credentials with `SOFTFOUNDRY_*` prefixed
 
 | Variable | Purpose |
 |----------|---------|
-| `SOFTFOUNDRY_ANTHROPIC_API_KEY` | Direct API calls for question detection |
+| `SOFTFOUNDRY_ANTHROPIC_API_KEY` | Direct Anthropic API calls |
 | `SOFTFOUNDRY_CLAUDE_CODE_OAUTH_TOKEN` | Claude Code SDK authentication |
 
 The system will:
@@ -271,12 +277,13 @@ The system will:
 2. Load credentials from `.env` using the prefixed names
 3. Validate all required variables before starting
 
-## Interactive Input
+## Textual TUI
 
-Agents feature an interactive terminal UI using `prompt_toolkit`:
-- Persistent input prompt at the bottom of the terminal
-- Status indicator showing agent state (working, waiting, idle)
-- Type while the agent is working to interrupt and send input
+Agents feature a split-pane terminal UI built with Textual:
+- Scrollable message stream with markdown rendering and collapsible tool blocks
+- Sidebar with agent status, session info, task, and epic progress
+- Input area at the bottom — answers agent questions or interrupts with free-text
+- `ask_user` / `ask_user_choice` MCP tools let agents explicitly request user input
 - Press Ctrl+C to exit gracefully
 
 ## Development

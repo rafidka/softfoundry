@@ -11,7 +11,6 @@ dependencies = [
     "anthropic>=0.79.0",
     "claude-agent-sdk>=0.1.35",
     "httpx>=0.28.1",
-    "prompt-toolkit>=3.0.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
     "rich>=14.3.2",

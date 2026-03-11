@@ -138,6 +138,7 @@ StatusBar {
 .question-block {
     background: $panel;
     border: tall $accent;
+    padding: 0 1;
     height: auto;
 }
 
