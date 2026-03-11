@@ -828,7 +828,6 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         assert self._bridge is not None
 
         self._bridge.status = "waiting"
-        self._bridge.show_lifecycle_message("Waiting for your input...", "info")
 
         # Enter question mode on the TUI input area
         try:

@@ -163,6 +163,9 @@ class AgentBridge:
         """Process a system message."""
         if self._verbosity == "minimal":
             return
+        # Skip init messages — they're SDK initialization noise
+        if message.subtype == "init":
+            return
         self._call_on_app("add_system_block", message.subtype)
 
     def _handle_result_message(self, message: ResultMessage) -> None:

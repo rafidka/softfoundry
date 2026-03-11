@@ -19,7 +19,7 @@ from typing import Any
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Markdown, Static
 
 
 # ─── Helper ──────────────────────────────────────────────────────────────────
@@ -40,18 +40,50 @@ def _escape_markup(text: str) -> str:
 # ─── Text Message ────────────────────────────────────────────────────────────
 
 
-class TextMessage(Static):
-    """Plain assistant text output."""
+def _preserve_newlines(text: str) -> str:
+    """Convert single newlines to markdown hard breaks.
 
-    DEFAULT_CSS = ""
+    In standard markdown, a single newline is a soft break (collapsed
+    to a space). LLM output often uses single newlines for visual line
+    breaks. This converts them to hard breaks (two trailing spaces +
+    newline) while preserving:
+    - Double newlines (paragraph breaks) — left as-is
+    - Content inside fenced code blocks (``` ... ```) — left as-is
+    """
+    import re
+
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    result: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            # Inside a fenced code block — leave as-is
+            result.append(part)
+        else:
+            # Outside code blocks — add trailing spaces for hard breaks
+            # Replace single \n (not part of \n\n) with "  \n"
+            processed = re.sub(r"(?<!\n)\n(?!\n)", "  \n", part)
+            result.append(processed)
+    return "".join(result)
+
+
+class TextMessage(Markdown):
+    """Assistant text output rendered as markdown.
+
+    Uses Textual's Markdown widget which creates a subtree of child
+    widgets (MarkdownParagraph, MarkdownFence, etc.) for proper
+    block-level layout, syntax-highlighted code blocks, and tables.
+    """
+
+    DEFAULT_CSS = """
+    TextMessage {
+        padding: 0;
+        margin: 0 0 1 0;
+    }
+    """
 
     def __init__(self, text: str, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._text = text
+        super().__init__(_preserve_newlines(text), **kwargs)
         self.add_class("message-block", "text-message")
-
-    def render(self) -> str:
-        return _escape_markup(self._text)
 
 
 # ─── User Message ────────────────────────────────────────────────────────────
