@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.0.0",
     "rich>=14.3.2",
+    "textual>=3.0.0",
     "typer>=0.24.1",
 ]
 

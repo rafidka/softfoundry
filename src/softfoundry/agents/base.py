@@ -9,7 +9,6 @@ Subclasses implement agent-specific logic via abstract methods.
 """
 
 import asyncio
-import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -26,8 +25,8 @@ from pydantic import BaseModel, Field
 
 from softfoundry.agents.memory import get_memory_path, read_memory
 from softfoundry.agents.sessions import SessionManager, format_session_info
+from softfoundry.tui import AgentBridge, SoftFoundryApp
 from softfoundry.utils.env import get_claude_code_token
-from softfoundry.utils.interactive import InteractiveInput
 from softfoundry.utils.llm import needs_user_input
 from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.status import get_status_path, read_status, update_status
@@ -185,9 +184,9 @@ class Agent(ABC):
         self._iteration = 0
         self._last_assistant_text = ""
 
-        # Interactive input and SDK client (set up later in run())
-        self._interactive: InteractiveInput | None = None
-        self._input_task: asyncio.Task[None] | None = None
+        # TUI bridge and SDK client (set up later in run())
+        self._bridge: AgentBridge | None = None
+        self._app: SoftFoundryApp | None = None
         self._client: ClaudeSDKClient | None = None
 
         # User input handling (no queue - just a single pending input slot)
@@ -473,11 +472,14 @@ class Agent(ABC):
     # ─────────────────────────────────────────────────────────────────────────
 
     @property
-    def printer(self) -> MessagePrinter:
+    def printer(self) -> MessagePrinter | AgentBridge:
         """Access the message printer for custom output.
 
+        Returns either the original MessagePrinter or the AgentBridge
+        (which provides the same print_message interface).
+
         Returns:
-            The MessagePrinter instance configured for this agent.
+            The printer instance configured for this agent.
         """
         return self._printer
 
@@ -550,9 +552,9 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     # ─────────────────────────────────────────────────────────────────────────
 
     def _handle_user_input(self, text: str) -> None:
-        """Handle user input from the interactive input.
+        """Handle user input from the TUI.
 
-        This is called by InteractiveInput when the user submits input.
+        This is called by the Textual app when the user submits input.
         The agent decides whether to interrupt the current turn or just
         store the input for later processing.
 
@@ -563,17 +565,19 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         if self._is_turn_running and self._client:
             # Agent is busy - interrupt and process the input
-            self._printer.console.print(
-                f"[dim italic]Interrupting with: {text[:50]}{'...' if len(text) > 50 else ''}[/dim italic]"
-            )
-            # Create a task to call interrupt (we're in a sync callback)
+            if self._bridge:
+                self._bridge.show_lifecycle_message(
+                    f"Interrupting with: {text[:50]}{'...' if len(text) > 50 else ''}",
+                    "info",
+                )
+            # Schedule interrupt on the event loop
             asyncio.create_task(self._interrupt_current_turn())
 
     async def _interrupt_current_turn(self) -> None:
         """Interrupt the current turn."""
         if self._client:
-            if self._interactive:
-                self._interactive.status = "interrupting"
+            if self._bridge:
+                self._bridge.status = "interrupting"
             await self._client.interrupt()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -581,33 +585,62 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     # ─────────────────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
-        """Main entry point - runs the agent loop.
+        """Main entry point - runs the agent loop via the Textual TUI.
 
         This method:
-        1. Verifies stdin is a TTY (required for interactive input)
-        2. Creates the Claude SDK client with interactive input
-        3. Sends the initial prompt
-        4. Loops until completion or max iterations
+        1. Builds the Claude SDK options
+        2. Creates the Textual TUI app and bridge
+        3. Runs the agent loop as a Textual worker inside the app
+        4. The TUI handles all input/output
 
-        A persistent input prompt is shown at the bottom of the terminal.
-        Users can type while the agent is working. If they submit input
-        while the agent is busy, it interrupts and processes their input.
-
-        Press Ctrl+C to exit at any time.
+        Press Ctrl+D to exit at any time.
 
         Raises:
-            RuntimeError: If stdin is not a TTY.
             Exception: Re-raises any exception after calling on_error().
         """
-        # Require a TTY for interactive input
-        if not sys.stdin.isatty():
-            raise RuntimeError(
-                "Interactive mode requires a TTY. "
-                "Please run this agent in an interactive terminal."
-            )
-
         # Build Claude SDK options
-        options = ClaudeAgentOptions(
+        options = self._build_sdk_options()
+
+        # Store options for the worker to use
+        self._sdk_options = options
+
+        # Create the Textual TUI app
+        self._app = SoftFoundryApp(
+            agent_type=self.config.agent_type,
+            agent_name=self.config.agent_name,
+            project=self.config.namespace,
+            epic_number=getattr(self, "_epic_number", None),
+            on_input=self._handle_user_input,
+            agent_coroutine=self._agent_worker,
+        )
+
+        # Create the bridge (adapter between agent and TUI)
+        self._bridge = AgentBridge(app=self._app)
+        self._bridge._verbosity = self.config.verbosity
+
+        # Replace the printer with the bridge (it implements print_message)
+        # The bridge's console property provides backward compatibility
+        self._printer = self._bridge  # type: ignore[assignment]
+
+        try:
+            await self._app.run_async()
+        except KeyboardInterrupt:
+            if self._bridge:
+                self._bridge.show_lifecycle_message(
+                    "Interrupted. Exiting...", "warning"
+                )
+            self.on_shutdown()
+        except Exception as e:
+            self.on_error(e)
+            raise
+
+    def _build_sdk_options(self) -> ClaudeAgentOptions:
+        """Build the Claude SDK options from config.
+
+        Returns:
+            ClaudeAgentOptions ready for use with ClaudeSDKClient.
+        """
+        return ClaudeAgentOptions(
             allowed_tools=self.config.allowed_tools,
             permission_mode=self.config.permission_mode,
             mcp_servers=self.config.mcp_servers if self.config.mcp_servers else {},
@@ -615,53 +648,34 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             system_prompt=self._build_system_prompt(),
             cwd=self._get_cwd(),
             env={
-                "ANTHROPIC_API_KEY": "",  # Empty ANTHROPIC_API_KEY to prevent SDK from using API key
+                "ANTHROPIC_API_KEY": "",
                 "CLAUDE_CODE_OAUTH_TOKEN": get_claude_code_token(),
             },
         )
 
-        # Create interactive input with our callback
-        self._interactive = InteractiveInput(
-            on_input=self._handle_user_input,
-            prompt="> ",
-        )
+    async def _agent_worker(self) -> None:
+        """The agent loop coroutine, run as a Textual worker.
 
+        This is the async function passed to SoftFoundryApp.agent_coroutine.
+        It runs the full agent loop within the Textual event loop.
+        """
         try:
-            async with self._interactive:
-                # Start the input listener as a background task
-                self._input_task = asyncio.create_task(self._interactive.run())
-
-                try:
-                    await self._run_loop(options)
-                finally:
-                    # Cancel the input task and suppress its exceptions
-                    self._cleanup_input_task()
-
+            await self._run_loop(self._sdk_options)
         except KeyboardInterrupt:
-            self._printer.console.print("\n[yellow]Interrupted. Exiting...[/yellow]")
+            if self._bridge:
+                self._bridge.show_lifecycle_message(
+                    "Interrupted. Exiting...", "warning"
+                )
             self.on_shutdown()
-            sys.exit(0)
         except Exception as e:
             self.on_error(e)
-            raise
-
-    def _cleanup_input_task(self) -> None:
-        """Clean up the input task, suppressing expected exceptions."""
-        if self._input_task:
-            if not self._input_task.done():
-                self._input_task.cancel()
-            # Suppress exceptions from the input task (KeyboardInterrupt, CancelledError)
-            # to avoid "Task exception was never retrieved" warnings
-            try:
-                self._input_task.exception()
-            except (
-                KeyboardInterrupt,
-                asyncio.CancelledError,
-                asyncio.InvalidStateError,
-            ):
-                pass
-        if self._interactive:
-            self._interactive.stop()
+            if self._bridge:
+                self._bridge.show_lifecycle_message(f"Agent error: {e}", "error")
+        finally:
+            # Give time for final messages to render, then exit the app
+            await asyncio.sleep(0.5)
+            if self._app:
+                self._app.exit()
 
     async def _run_loop(self, options: ClaudeAgentOptions) -> None:
         """Run the main agent loop.
@@ -669,7 +683,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Args:
             options: The ClaudeAgentOptions for the SDK client.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
 
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
@@ -708,16 +722,16 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Args:
             prompt: The message to send.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
         assert self._client is not None
 
-        self._interactive.disable("Sending message...")
-        self._interactive.status = "working"
+        self._bridge.disable("Sending message...")
+        self._bridge.status = "working"
 
         try:
             await self._client.query(prompt)
         finally:
-            self._interactive.enable()
+            self._bridge.enable()
 
     async def _process_turn(self) -> TurnResult:
         """Process one turn of messages from the agent.
@@ -725,12 +739,12 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             TurnResult indicating whether to exit or if interrupted.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
         assert self._client is not None
 
         self._last_assistant_text = ""
         self._is_turn_running = True
-        self._interactive.status = "thinking"
+        self._bridge.status = "thinking"
 
         result = TurnResult()
 
@@ -742,7 +756,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
                     text = extract_assistant_text(message)
                     self._last_assistant_text = text
                     self.on_assistant_message(message, text)
-                    self._interactive.status = "working"
+                    self._bridge.status = "working"
 
                 if isinstance(message, ResultMessage):
                     self._save_session(
@@ -779,7 +793,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             The next prompt to send, or None if the loop should exit.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
 
         # If we have pending user input (from interrupt or typed while idle)
         if self._pending_input is not None:
@@ -804,22 +818,37 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     async def _wait_for_user_input(self) -> str | None:
         """Wait for user input when the agent asks a question.
 
+        Activates question mode in the TUI so the input area shows
+        "Answer >" instead of ">" — signaling the user that the agent
+        is waiting for their response.
+
         Returns:
             The user's input, or None if interrupted.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
 
-        self._interactive.status = "waiting"
-        self._printer.console.print("[cyan]Waiting for your input...[/cyan]")
+        self._bridge.status = "waiting"
+        self._bridge.show_lifecycle_message("Waiting for your input...", "info")
 
-        while True:
-            # Check if input arrived
-            if self._pending_input is not None:
-                prompt = self._pending_input
-                self._pending_input = None
-                return prompt
+        # Enter question mode on the TUI input area
+        try:
+            self._bridge._call_on_app("set_question_mode", True)
+        except Exception:
+            pass
 
-            await asyncio.sleep(0.1)
+        try:
+            while True:
+                if self._pending_input is not None:
+                    prompt = self._pending_input
+                    self._pending_input = None
+                    return prompt
+                await asyncio.sleep(0.1)
+        finally:
+            # Exit question mode
+            try:
+                self._bridge._call_on_app("set_question_mode", False)
+            except Exception:
+                pass
 
     async def _wait_idle(self, interval: int) -> str | None:
         """Wait for the idle interval, checking for user input.
@@ -830,11 +859,11 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             User input if received during wait, or None to continue.
         """
-        assert self._interactive is not None
+        assert self._bridge is not None
 
-        self._interactive.status = "idle"
-        self._printer.console.print(
-            f"[dim]Waiting {interval}s before continuing...[/dim]"
+        self._bridge.status = "idle"
+        self._bridge.show_lifecycle_message(
+            f"Waiting {interval}s before continuing...", "info"
         )
 
         elapsed = 0.0
