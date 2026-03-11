@@ -14,6 +14,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import TextSelected
 from textual.reactive import reactive
 
 from softfoundry.tui.widgets.input_area import InputArea
@@ -152,6 +153,15 @@ class SoftFoundryApp(App[None]):
         """Jump to bottom of message stream."""
         stream = self.query_one(MessageStream)
         stream.scroll_to_bottom()
+
+    # ─── Selection ────────────────────────────────────────────────────────────
+
+    def _on_text_selected(self, event: TextSelected) -> None:
+        """Auto-copy selected text to clipboard on mouse selection."""
+        text = self.screen.get_selected_text()
+        if text:
+            self.copy_to_clipboard(text)
+            self.notify("Copied to clipboard", timeout=3)
 
     # ─── Input Handling ──────────────────────────────────────────────────────
 
