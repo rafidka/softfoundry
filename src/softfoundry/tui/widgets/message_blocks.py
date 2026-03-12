@@ -440,6 +440,20 @@ class SystemBlock(Static):
 # ─── Lifecycle Message ───────────────────────────────────────────────────────
 
 
+class SessionSeparator(Static):
+    """Visual separator between agent sessions in persistent TUI mode."""
+
+    def __init__(self, label: str = "", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._label = label
+        self.add_class("message-block", "session-separator")
+
+    def render(self) -> str:
+        if self._label:
+            return f"[bold $accent]{'─' * 3} {_escape_markup(self._label)} {'─' * 40}[/bold $accent]"
+        return f"[dim]{'─' * 50}[/dim]"
+
+
 class LifecycleMessage(Static):
     """Agent lifecycle events (completed, error, warning, info)."""
 

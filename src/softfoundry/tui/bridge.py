@@ -208,6 +208,12 @@ class AgentBridge:
         """Update epic progress in the sidebar."""
         self._call_on_app("update_epic_progress", issues)
 
+    # ─── Session Separators ─────────────────────────────────────────────────
+
+    def show_session_separator(self, label: str = "") -> None:
+        """Add a visual separator between sessions in persistent TUI mode."""
+        self._call_on_app("add_session_separator", label)
+
     # ─── Lifecycle Messages ──────────────────────────────────────────────────
 
     def show_lifecycle_message(self, text: str, level: str = "info") -> None:

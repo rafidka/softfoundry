@@ -2,8 +2,8 @@
 
 Each agent run drives a single PR review to completion (claim -> review ->
 wait for feedback if needed -> re-review -> approve), then exits. A Python
-outer loop in run_reviewer() handles re-launching the agent for the next PR
-with a fresh session.
+outer loop in run_reviewer() manages a persistent TUI across multiple
+review sessions.
 """
 
 import asyncio
@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 
 from claude_agent_sdk import ResultMessage
-from rich.console import Console
 
 from softfoundry.agents.base import Agent, AgentConfig
 from softfoundry.agents.prompts import (
@@ -20,6 +19,7 @@ from softfoundry.agents.prompts import (
     project_info_prompt,
 )
 from softfoundry.mcp import create_orchestrator_server
+from softfoundry.tui import AgentBridge, SoftFoundryApp
 from softfoundry.utils.github import LABEL_COLORS
 from softfoundry.utils.status import sanitize_name
 
@@ -369,10 +369,9 @@ async def run_reviewer(
 ) -> None:
     """Run the reviewer agent in a loop, one PR per session.
 
-    Each iteration creates a fresh ReviewerAgent with a new Claude SDK
-    session, drives one PR review to completion, then re-launches for the
-    next PR. The loop exits when there are no more PRs or the agent reports
-    all work is done.
+    Creates a single persistent TUI that stays alive across multiple review
+    sessions. Each iteration creates a fresh ReviewerAgent with a new
+    Claude SDK session, while the TUI preserves message history.
 
     Args:
         name: Reviewer name (e.g., "Rachel Review").
@@ -402,51 +401,107 @@ async def run_reviewer(
         print(agent.get_initial_prompt())
         return
 
-    console = Console()
-    first_run = True
-    run_number = 0
+    # Create the first agent BEFORE the TUI starts (session resolution
+    # may use bare input() for interactive prompts, which requires a
+    # normal terminal — not the Textual TUI).
+    first_agent = ReviewerAgent(
+        name=name,
+        github_repo=github_repo,
+        clone_path=clone_path,
+        project=project,
+        epic=epic,
+        resume=resume,
+        new_session=new_session,
+        verbosity=verbosity,
+        max_iterations=max_iterations,
+    )
 
-    while True:
-        run_number += 1
+    async def _multi_session_worker(app: SoftFoundryApp, bridge: AgentBridge) -> None:
+        """Multi-session worker coroutine for persistent TUI.
 
-        if not first_run:
-            console.print(
-                f"\n[bold cyan]--- Starting review run #{run_number} ---[/bold cyan]\n"
-            )
+        Runs inside the Textual event loop as an async worker.
+        Uses the pre-created first agent, then creates fresh agents
+        for subsequent reviews.
+        """
+        run_number = 0
+        agent = first_agent
 
-        agent = ReviewerAgent(
-            name=name,
-            github_repo=github_repo,
-            clone_path=clone_path,
-            project=project,
-            epic=epic,
-            resume=resume if first_run else False,
-            new_session=new_session if first_run else True,
-            verbosity=verbosity,
-            max_iterations=max_iterations,
-        )
+        while True:
+            run_number += 1
 
-        await agent.run()
+            if run_number > 1:
+                bridge.show_session_separator(f"Review #{run_number}")
+                agent = ReviewerAgent(
+                    name=name,
+                    github_repo=github_repo,
+                    clone_path=clone_path,
+                    project=project,
+                    epic=epic,
+                    resume=False,
+                    new_session=True,
+                    verbosity=verbosity,
+                    max_iterations=max_iterations,
+                )
 
-        exit_reason = agent.exit_reason
-        first_run = False
-
-        if exit_reason in ("all_done", "success"):
-            break
-
-        if exit_reason in ("review_complete", "no_prs"):
-            console.print(
-                f"\n[dim]Waiting {task_delay}s before picking up next PR...[/dim]"
-            )
             try:
-                await asyncio.sleep(task_delay)
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                console.print("\n[yellow]Interrupted during delay. Exiting.[/yellow]")
-                sys.exit(0)
-            continue
+                await agent.run_session(app, bridge)
+            except KeyboardInterrupt:
+                bridge.show_lifecycle_message(
+                    "Interrupted. Press Ctrl+D to exit.", "warning"
+                )
+                bridge.enable()
+                return
+            except Exception as e:
+                bridge.show_lifecycle_message(f"Agent error: {e}", "error")
+                bridge.show_lifecycle_message("Press Ctrl+D to exit.", "info")
+                bridge.enable()
+                return
 
-        # Unknown exit reason or error — stop
-        console.print(
-            f"[yellow]Agent exited with reason: {exit_reason}. Stopping.[/yellow]"
-        )
-        break
+            exit_reason = agent.exit_reason
+
+            if exit_reason in ("all_done", "success"):
+                bridge.show_lifecycle_message(
+                    "All reviews completed. Press Ctrl+D to exit.", "success"
+                )
+                bridge.enable()
+                return  # TUI stays open for user to review
+
+            if exit_reason in ("review_complete", "no_prs"):
+                # Show countdown in TUI
+                bridge.show_lifecycle_message(
+                    f"Next review in {task_delay}s...", "info"
+                )
+                bridge.status = "idle"
+                try:
+                    await asyncio.sleep(task_delay)
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    bridge.show_lifecycle_message(
+                        "Interrupted. Press Ctrl+D to exit.", "warning"
+                    )
+                    bridge.enable()
+                    return
+                continue
+
+            # Unknown exit reason — stop
+            bridge.show_lifecycle_message(
+                f"Agent exited ({exit_reason}). Press Ctrl+D to exit.", "warning"
+            )
+            bridge.enable()
+            return
+
+    # Create the persistent TUI app
+    app = SoftFoundryApp(
+        agent_type=AGENT_TYPE,
+        agent_name=name,
+        project=project,
+        epic_number=epic,
+        on_input=lambda text: None,  # Rewired per-session by _attach_tui
+        agent_coroutine=lambda: _multi_session_worker(app, bridge),
+    )
+    bridge = AgentBridge(app=app)
+    bridge._verbosity = verbosity
+
+    try:
+        await app.run_async()
+    except KeyboardInterrupt:
+        sys.exit(0)

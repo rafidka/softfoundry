@@ -263,6 +263,15 @@ StatusBar {
     color: $error;
 }
 
+/* ─── Session separator ─── */
+
+.session-separator {
+    color: $accent;
+    text-style: bold;
+    height: 1;
+    margin: 1 0;
+}
+
 /* ─── Lifecycle messages ─── */
 
 .lifecycle-success {

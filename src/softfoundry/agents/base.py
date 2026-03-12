@@ -197,6 +197,9 @@ class Agent(ABC):
         self._pending_input: str | None = None
         self._is_turn_running = False
 
+        # Completion tracking (for TUI dismiss behavior)
+        self._completed = False
+
         # Heartbeat tracking
         self._last_heartbeat: float = time.time()
 
@@ -588,6 +591,45 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     # MAIN LOOP
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _setup_user_server(self) -> None:
+        """Create the user input MCP server and inject it into config.
+
+        This adds the ask_user / ask_user_choice tools to the agent's
+        allowed tools and MCP servers. Safe to call multiple times (idempotent).
+        """
+        if self._user_server is not None:
+            return  # Already set up
+        user_server_config, self._user_server = create_user_server(name="user")
+        self.config.mcp_servers["user"] = user_server_config
+        self.config.allowed_tools.extend(
+            [
+                "mcp__user__ask_user",
+                "mcp__user__ask_user_choice",
+            ]
+        )
+
+    def _attach_tui(self, app: SoftFoundryApp, bridge: AgentBridge) -> None:
+        """Attach this agent to an existing TUI app and bridge.
+
+        Used by persistent TUI mode where the TUI outlives individual
+        agent sessions.
+
+        Args:
+            app: The Textual app to use.
+            bridge: The bridge to use for TUI communication.
+        """
+        self._app = app
+        self._bridge = bridge
+        self._bridge._verbosity = self.config.verbosity
+        self._printer = self._bridge  # type: ignore[assignment]
+
+        # Reconnect user server to the bridge
+        if self._user_server:
+            self._user_server.set_bridge(self._bridge)
+
+        # Rewire the app's input callback to this agent
+        self._app._on_input = self._handle_user_input
+
     async def run(self) -> None:
         """Main entry point - runs the agent loop via the Textual TUI.
 
@@ -598,20 +640,13 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         4. Connects the user server to the bridge
         5. Runs the agent loop as a Textual worker inside the app
 
-        Press Ctrl+D to exit at any time.
+        The TUI stays open after completion so the user can review the
+        conversation. Press Ctrl+D to exit.
 
         Raises:
             Exception: Re-raises any exception after calling on_error().
         """
-        # Create user input MCP server (ask_user / ask_user_choice tools)
-        user_server_config, self._user_server = create_user_server(name="user")
-        self.config.mcp_servers["user"] = user_server_config
-        self.config.allowed_tools.extend(
-            [
-                "mcp__user__ask_user",
-                "mcp__user__ask_user_choice",
-            ]
-        )
+        self._setup_user_server()
 
         # Build Claude SDK options (includes injected user server)
         options = self._build_sdk_options()
@@ -634,6 +669,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         self._bridge._verbosity = self.config.verbosity
 
         # Connect user server to bridge so it can display questions in TUI
+        assert self._user_server is not None
         self._user_server.set_bridge(self._bridge)
 
         # Replace the printer with the bridge (it implements print_message)
@@ -650,6 +686,53 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             self.on_shutdown()
         except Exception as e:
             self.on_error(e)
+            raise
+
+    async def run_session(
+        self,
+        app: SoftFoundryApp,
+        bridge: AgentBridge,
+    ) -> None:
+        """Run one SDK session using an existing (persistent) TUI.
+
+        Unlike run(), this does NOT create or destroy the TUI. It:
+        1. Sets up the user server (if not already done)
+        2. Attaches to the provided TUI app/bridge
+        3. Runs the agent loop (_run_loop)
+        4. Returns when the session completes (TUI stays open)
+
+        Used by the outer loops in run_programmer/run_reviewer for
+        persistent TUI mode.
+
+        Args:
+            app: The persistent Textual app.
+            bridge: The persistent bridge.
+
+        Raises:
+            Exception: Re-raises any exception after calling on_error().
+        """
+        self._setup_user_server()
+        self._attach_tui(app, bridge)
+
+        # Build SDK options
+        self._sdk_options = self._build_sdk_options()
+
+        # Reset iteration counter for this session
+        self._iteration = 0
+
+        try:
+            await self._run_loop(self._sdk_options)
+        except KeyboardInterrupt:
+            if self._bridge:
+                self._bridge.show_lifecycle_message(
+                    "Interrupted. Exiting...", "warning"
+                )
+            self.on_shutdown()
+            raise
+        except Exception as e:
+            self.on_error(e)
+            if self._bridge:
+                self._bridge.show_lifecycle_message(f"Agent error: {e}", "error")
             raise
 
     def _build_sdk_options(self) -> ClaudeAgentOptions:
@@ -676,6 +759,9 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         This is the async function passed to SoftFoundryApp.agent_coroutine.
         It runs the full agent loop within the Textual event loop.
+
+        On completion, the TUI stays open so the user can review the
+        conversation and press Ctrl+D to exit.
         """
         try:
             await self._run_loop(self._sdk_options)
@@ -689,11 +775,18 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             self.on_error(e)
             if self._bridge:
                 self._bridge.show_lifecycle_message(f"Agent error: {e}", "error")
-        finally:
-            # Give time for final messages to render, then exit the app
-            await asyncio.sleep(0.5)
-            if self._app:
-                self._app.exit()
+
+        # Give time for final messages to render
+        await asyncio.sleep(0.5)
+
+        if self._completed and self._bridge:
+            # Agent completed — keep TUI open for user to review
+            self._bridge.show_lifecycle_message("Press Ctrl+D to exit.", "info")
+            self._bridge.enable()
+            # Don't call app.exit() — user will press Ctrl+D when ready
+        elif self._app:
+            # Error or interrupt — auto-exit
+            self._app.exit()
 
     async def _run_loop(self, options: ClaudeAgentOptions) -> None:
         """Run the main agent loop.
@@ -788,6 +881,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
                     if self._pending_input is not None:
                         result.was_interrupted = True
                     elif self.is_complete(message):
+                        self._completed = True
                         self.on_complete()
                         result.should_exit = True
 

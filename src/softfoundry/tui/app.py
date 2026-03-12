@@ -22,6 +22,7 @@ from softfoundry.tui.widgets.message_blocks import (
     LifecycleMessage,
     QuestionBlock,
     ResultBlock,
+    SessionSeparator,
     SystemBlock,
     TextMessage,
     ThinkingBlock,
@@ -337,6 +338,11 @@ class SoftFoundryApp(App[None]):
         """Add a lifecycle message (success, error, warning, info)."""
         stream = self.query_one(MessageStream)
         stream.add_block(LifecycleMessage(text, level))
+
+    def add_session_separator(self, label: str = "") -> None:
+        """Add a visual separator between sessions."""
+        stream = self.query_one(MessageStream)
+        stream.add_block(SessionSeparator(label))
 
     def update_task_info(
         self,
