@@ -199,12 +199,11 @@ Enables crash recovery through session persistence.
 ```python
 SESSIONS_DIR = Path.home() / ".softfoundry" / "sessions"
 
-@dataclass
-class SessionInfo:
+class SessionInfo(BaseModel):
     session_id: str
     agent_name: str
     agent_type: str
-    project: str
+    prefix: str
     last_run: str
     num_turns: int
     total_cost_usd: float | None = None
@@ -251,15 +250,6 @@ ask_user_choice(question: str, options: list[str]) -> str
 
 Tools block Claude's turn (await asyncio.Event) until the user responds via the TUI.
 
-#### Input Handling (`input.py`)
-
-Multi-line input for user responses.
-
-```python
-def read_multiline_input(prompt: str = "> ") -> str
-    """Read lines until empty line submitted."""
-```
-
 ### 3. CLI (`src/softfoundry/cli/`)
 
 #### Clear Command (`clear.py`)
@@ -267,9 +257,9 @@ def read_multiline_input(prompt: str = "> ") -> str
 Cleans up sessions and status files.
 
 ```bash
-softfoundry-clear              # Clear all
-softfoundry-clear --project X  # Clear specific project
-softfoundry-clear --dry-run    # Preview only
+sf clear              # Clear all
+sf clear --project X  # Clear specific project
+sf clear --dry-run    # Preview only
 ```
 
 ---
@@ -664,7 +654,7 @@ Agents use `gh` CLI with the user's authentication:
 Status files are stored in user's home directory:
 - Only accessible by the user
 - Contain no secrets (just metadata)
-- Can be cleaned with `softfoundry-clear`
+- Can be cleaned with `sf clear`
 
 ---
 
@@ -690,7 +680,7 @@ The system includes a custom MCP server (`src/softfoundry/mcp/orchestrator.py`) 
 
 **Key Components:**
 - `github_client.py` - Async GitHub API client using `httpx` and `gh auth token`
-- `orchestrator.py` - MCP server with 17 tools for epic/issue/PR/activity management
+- `orchestrator.py` - MCP server with 30+ tools for epic/issue/PR/activity/health management
 - `types.py` - Type definitions (`EpicStatus`, `PRStatus`, `ActivityEntry`, etc.)
 
 **How Agents Use It:**

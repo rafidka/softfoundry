@@ -9,7 +9,7 @@ This document provides instructions for AI coding agents working in this reposit
 - **Package Manager**: uv (https://docs.astral.sh/uv/)
 - **Python Version**: 3.12+
 - **Source Layout**: `src/softfoundry/`
-- **Dependencies**: `claude-agent-sdk`, `anthropic`, `rich`, `textual`, `python-dotenv`
+- **Dependencies**: `anthropic`, `claude-agent-sdk`, `httpx`, `pydantic`, `python-dotenv`, `rich`, `textual`, `typer`
 
 ## Architecture
 
@@ -38,11 +38,16 @@ softfoundry/
 │   │   ├── manager.py         # Manager agent (coordinates project)
 │   │   ├── memory.py          # Agent memory file management
 │   │   ├── programmer.py      # Programmer agent (implements tasks)
+│   │   ├── prompts.py         # Shared prompt builders
 │   │   ├── reviewer.py        # Reviewer agent (reviews and merges PRs)
 │   │   └── sessions.py        # Session persistence
 │   ├── cli/                   # CLI commands
 │   │   ├── __init__.py
-│   │   └── clear.py           # Clear sessions and status files
+│   │   ├── clear.py           # Clear sessions and status files
+│   │   ├── debug.py           # Debug subcommands for orchestrator tools
+│   │   ├── manager.py         # Manager CLI command
+│   │   ├── programmer.py      # Programmer CLI command
+│   │   └── reviewer.py        # Reviewer CLI command
 │   ├── mcp/                   # MCP servers
 │   │   ├── __init__.py
 │   │   ├── github_client.py   # Async GitHub API client
@@ -65,7 +70,7 @@ softfoundry/
 │   └── utils/                 # Shared utilities
 │       ├── __init__.py
 │       ├── env.py             # Environment variable loading (.env)
-│       ├── input.py           # Multi-line input handling
+│       ├── github.py          # GitHub label colors, GraphQL helpers, signatures
 │       ├── llm.py             # LLM utilities
 │       ├── output.py          # Rich message formatting
 │       └── status.py          # Agent status file management
@@ -74,8 +79,9 @@ softfoundry/
 │   └── {project}-{name}/      # Programmer worktrees
 ├── .env.example               # Environment template
 ├── ARCHITECTURE.md            # System architecture details
+├── MCP_TOOLS.md               # MCP tool documentation by agent
 ├── claude-docs/               # Claude Agent SDK reference
-│   └── IMPLEMENTATION_PLAN.md # Implementation design
+│   └── ClaudeAgentSDK.md      # Claude Agent SDK reference
 ├── pyproject.toml             # Project configuration
 └── uv.lock                    # Dependency lock file
 
@@ -99,17 +105,18 @@ softfoundry/
 # Install dependencies
 uv sync
 
-# Run the main entry point
+# Run the main entry point (both aliases work)
 uv run softfoundry
+uv run sf
 
 # Clear all sessions and status files
-uv run softfoundry-clear
+uv run sf clear
 
 # Clear files for a specific project
-uv run softfoundry-clear --project myproject
+uv run sf clear --project myproject
 
 # Dry run (see what would be deleted)
-uv run softfoundry-clear --dry-run
+uv run sf clear --dry-run
 
 # Add dependencies
 uv add <package-name>
@@ -160,8 +167,8 @@ Order imports in three groups separated by blank lines:
 3. Local application
 
 ```python
-import argparse
 import asyncio
+import json
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
@@ -211,7 +218,7 @@ def process_task(name: str, timeout: int = 30) -> dict[str, Any]:
 ### Docstrings and Data Structures
 
 - Use Google-style docstrings (Args, Returns, Raises sections)
-- Prefer `dataclasses` for data structures
+- Prefer Pydantic `BaseModel` or `dataclasses` for data structures
 
 ## Project-Specific Patterns
 
@@ -297,6 +304,10 @@ def on_error(self, error: Exception) -> None:
 def on_complete(self) -> None:
     """Called when is_complete() returns True."""
     self.update_status("exited:success", "Completed successfully")
+
+def on_max_iterations(self) -> None:
+    """Called when max iterations safety limit is reached."""
+    self.update_status("exited:terminated", "Max iterations reached")
 ```
 
 ### Running Agents
@@ -442,9 +453,14 @@ Manager agents also include:
 **`agents/base.py`** - Agent loop framework:
 
 - `Agent` - Abstract base class for building agents
-- `AgentConfig` - Configuration dataclass for agents
+- `AgentConfig` - Configuration BaseModel for agents
 - `TurnResult` - Result of processing one agent turn
 - `extract_assistant_text()` - Extract text from AssistantMessage
+
+**`agents/prompts.py`** - Shared prompt builders:
+
+- `project_info_prompt()` - Build project info context for agent prompts
+- `orchestrator_mcp_tools_prompt()` - Build MCP tools reference for agent prompts
 
 **`agents/memory.py`** - Agent memory file management:
 
@@ -454,7 +470,7 @@ Manager agents also include:
 **`agents/sessions.py`** - Session persistence:
 
 - `SessionManager` - Manages session files for crash recovery
-- `SessionInfo` - Dataclass for session metadata
+- `SessionInfo` - BaseModel for session metadata
 - `format_session_info()` - Human-readable session display
 
 ### Utility Modules
@@ -483,9 +499,12 @@ Manager agents also include:
 
 - Reserved for future LLM utility functions
 
-**`utils/input.py`** - Input handling:
+**`utils/github.py`** - GitHub helpers:
 
-- `read_multiline_input()` - Read multi-line user input
+- `LABEL_COLORS` - Label color definitions
+- `format_signature()` - Format agent signature for comments
+- `format_inline_signature()` - Format inline agent signature
+- GraphQL query/mutation builders for sub-issue management
 
 ### MCP Servers
 
@@ -510,23 +529,44 @@ _Epic/Issue Tools:_
 - `list_my_sub_issues(epic_number, agent_name)` - List assigned sub-issues
 - `claim_sub_issue(epic_number, sub_issue_number, agent_name)` - Claim a sub-issue (validates dependencies are resolved)
 - `update_sub_issue_status(epic_number, sub_issue_number, new_status)` - Update status
-- `create_sub_issue(epic_number, title, body, priority, depends_on)` - Create and link sub-issue (depends_on is a comma-separated string of issue numbers, e.g. "3,5")
+- `create_sub_issue(epic_number, title, body, priority, depends_on, agent_name, agent_type)` - Create and link sub-issue (depends_on is a comma-separated string of issue numbers, e.g. "3,5")
 - `close_epic(epic_number)` - Close the epic
+- `create_issue(title, body, labels)` - Create a standalone issue
+- `list_issues(labels, state)` - List issues by labels/state
 
 _PR Tools:_
 
 - `get_pr_status(pr_number)` - Get PR status with `has_feedback` flag
-- `list_my_prs(author_name)` - List PRs by author
-- `list_prs_for_review(epic_number)` - List PRs awaiting review
+- `list_my_prs(author_name)` - List PRs by author (via assignee label)
+- `list_my_reviews(reviewer_name)` - List PRs assigned to reviewer
+- `list_prs_for_review(epic_number)` - List PRs awaiting review (no reviewer assigned)
+- `list_open_prs()` - List all open PRs
 - `claim_pr_review(pr_number, reviewer_name)` - Claim PR for review
-- `request_changes(pr_number, comment)` - Request changes (adds feedback-requested label)
-- `mark_feedback_addressed(pr_number)` - Mark feedback addressed (removes label)
-- `approve_pr(pr_number, comment)` - Approve PR
+- `request_changes(pr_number, agent_name, agent_type, comment, inline_comments)` - Request changes (adds feedback-requested label; inline_comments uses "path:line:body" format)
+- `mark_feedback_addressed(pr_number, agent_name, agent_type, comment)` - Mark feedback addressed (removes feedback-requested label)
+- `approve_pr(pr_number, agent_name, agent_type, comment)` - Approve PR (adds approved label)
+- `get_pr_feedback(pr_number)` - Get combined reviews and inline comments
+- `get_pr_diff(pr_number)` - Get PR diff text
+- `create_pr(title, body, head_branch, base_branch, agent_name, agent_type, labels)` - Create PR with agent signature
+- `merge_pr(pr_number, method, delete_branch)` - Merge PR (merge/squash/rebase)
+
+_Comment & Label Tools:_
+
+- `comment_on_issue(issue_number, agent_name, agent_type, comment)` - Post signed comment on issue
+- `comment_on_pr(pr_number, agent_name, agent_type, comment)` - Post signed comment on PR
+- `create_label(name, color, description)` - Create or update a label
+- `update_issue_labels(issue_number, add_labels, remove_labels)` - Add/remove labels (comma-separated)
 
 _Activity Tools:_
 
 - `log_activity(epic_number, agent_name, agent_type, event_type, message, issue_number, pr_number)` - Log activity to epic
 - `get_activity_log(epic_number, limit)` - Get recent activity
+
+_Agent Health Tools:_
+
+- `list_stale_agents(project)` - List non-responsive agents (>5 min without heartbeat)
+- `unassign_programmer(epic_number, sub_issue_number, comment)` - Unassign programmer and reset issue to pending
+- `unassign_reviewer(pr_number, comment)` - Unassign reviewer from PR
 
 **`mcp/github_client.py`** - Async GitHub API client:
 

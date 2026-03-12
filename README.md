@@ -51,25 +51,24 @@ gh auth status
 ### 1. Start the Manager
 
 ```bash
-uv run python -m softfoundry.agents.manager
+sf manager
 ```
 
 The manager will:
 - Prompt for the GitHub repository (e.g., `myuser/myproject`)
-- Prompt for number of programmers
 - Clone the repository to `castings/{project}/`
 - Check for `PROJECT.md` (collaborate with you to create it if missing)
-- Create GitHub issues for each task
+- Create a top-level epic issue and sub-issues for each task
 - Provide commands to start programmer and reviewer agents
 - Monitor progress until completion
 
 ### 2. With All Options Specified
 
 ```bash
-uv run python -m softfoundry.agents.manager \
+sf manager \
     --github-repo myuser/myproject \
     --clone-path castings/myproject \
-    --num-programmers 2
+    --epic 42
 ```
 
 ### 3. Start Programmer and Reviewer Agents
@@ -78,24 +77,28 @@ After the manager completes setup, start the agents in separate terminals:
 
 ```bash
 # Terminal 2: Programmer 1
-uv run python -m softfoundry.agents.programmer \
+sf programmer \
     --name "Alice Chen" \
     --github-repo myuser/myproject \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 
 # Terminal 3: Programmer 2
-uv run python -m softfoundry.agents.programmer \
+sf programmer \
     --name "Bob Smith" \
     --github-repo myuser/myproject \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 
 # Terminal 4: Reviewer
-uv run python -m softfoundry.agents.reviewer \
+sf reviewer \
+    --name "Rachel Review" \
     --github-repo myuser/myproject \
     --clone-path castings/myproject \
-    --project myproject
+    --project myproject \
+    --epic 42
 ```
 
 ## How It Works
@@ -104,22 +107,22 @@ uv run python -m softfoundry.agents.reviewer \
 
 1. Manager clones the GitHub repository
 2. Reads or creates `PROJECT.md` describing the project
-3. Creates labeled GitHub issues for each task
-4. Creates assignee labels for each programmer
+3. Creates a top-level epic issue with sub-issues for each task
+4. Creates status, priority, and assignee labels
 
 ### Phase 2: Work
 
 1. Manager instructs user to start programmer and reviewer agents
-2. Programmers pick up assigned tasks (or help with unassigned ones)
+2. Programmers self-assign unassigned sub-issues (pull-based model)
 3. Each programmer works in their own git worktree
 4. Programmers create PRs when tasks are complete
-5. Reviewer reviews PRs, requests changes or approves and merges
+5. Reviewers self-assign PRs, review code, request changes or approve and merge
 
 ### Phase 3: Monitoring
 
-1. Manager monitors agent health via status files
-2. Checks GitHub for task completion status
-3. Detects project completion when all issues are closed
+1. Manager monitors agent health via status files and heartbeats
+2. Detects stale agents and releases their tasks
+3. Tracks epic progress and detects project completion when all sub-issues are closed
 
 ## CLI Reference
 
@@ -127,13 +130,12 @@ uv run python -m softfoundry.agents.reviewer \
 
 | Option | Description |
 |--------|-------------|
-| `--github-repo` | GitHub repository (OWNER/REPO format) |
+| `--github-repo` | GitHub repository (OWNER/REPO format, prompted if not provided) |
 | `--clone-path` | Local path to clone repo (default: castings/{project}) |
-| `--num-programmers` | Number of programmer agents |
-| `--verbosity` | Output level: minimal, medium, verbose |
+| `--epic` | GitHub issue number to use as the top-level epic |
+| `--verbosity` | Output level: minimal, medium, verbose (default: medium) |
 | `--max-iterations` | Safety limit for loop iterations (default: 100) |
-| `--resume` | Resume existing session |
-| `--new-session` | Start fresh, deleting existing session |
+| `--session` | Session mode: auto, resume, or new (default: auto) |
 
 ### Programmer
 
@@ -143,28 +145,33 @@ uv run python -m softfoundry.agents.reviewer \
 | `--github-repo` | GitHub repository (required) |
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
-| `--verbosity`, `--max-iterations`, `--resume`, `--new-session` | Same as manager |
+| `--epic` | GitHub issue number of the epic to work on (required) |
+| `--task-delay` | Seconds to wait between task runs (default: 60) |
+| `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 ### Reviewer
 
 | Option | Description |
 |--------|-------------|
+| `--name` | Reviewer name (required, e.g., "Rachel Review") |
 | `--github-repo` | GitHub repository (required) |
 | `--clone-path` | Path to main git clone (required) |
 | `--project` | Project name (required) |
-| `--verbosity`, `--max-iterations`, `--resume`, `--new-session` | Same as manager |
+| `--epic` | GitHub issue number of the epic to work on (required) |
+| `--task-delay` | Seconds to wait between review runs (default: 60) |
+| `--verbosity`, `--max-iterations`, `--session` | Same as manager |
 
 ### Utility Commands
 
 ```bash
 # Clear all sessions and status files
-uv run softfoundry-clear
+sf clear
 
 # Clear files for a specific project
-uv run softfoundry-clear --project myproject
+sf clear --project myproject
 
 # Preview what would be deleted
-uv run softfoundry-clear --dry-run
+sf clear --dry-run
 ```
 
 ## Project Structure
@@ -177,19 +184,29 @@ softfoundry/
 │   │   ├── manager.py    # Manager agent (coordinates project)
 │   │   ├── memory.py     # Agent memory file management
 │   │   ├── programmer.py # Programmer agent (implements tasks)
+│   │   ├── prompts.py    # Shared prompt builders
 │   │   ├── reviewer.py   # Reviewer agent (reviews and merges PRs)
 │   │   └── sessions.py   # Session persistence
-│   ├── cli/              # CLI commands (clear)
+│   ├── cli/              # CLI commands
+│   │   ├── clear.py      # Clear sessions and status files
+│   │   ├── debug.py      # Debug subcommands for orchestrator tools
+│   │   ├── manager.py    # Manager CLI command
+│   │   ├── programmer.py # Programmer CLI command
+│   │   └── reviewer.py   # Reviewer CLI command
 │   ├── mcp/              # MCP servers
 │   │   ├── orchestrator.py # GitHub coordination
-│   │   └── user_server.py  # User interaction (ask_user)
+│   │   ├── user_server.py  # User interaction (ask_user)
+│   │   ├── github_client.py # Async GitHub API client
+│   │   ├── constants.py    # Shared constants
+│   │   └── types.py        # Shared types
 │   ├── tui/              # Textual TUI
 │   │   ├── app.py        # Main Textual App
 │   │   ├── bridge.py     # Agent-to-TUI bridge
+│   │   ├── styles/       # TUI stylesheets
 │   │   └── widgets/      # TUI widget components
 │   └── utils/            # Shared utilities
 │       ├── env.py        # Environment variable loading (.env)
-│       ├── input.py      # Multi-line input handling
+│       ├── github.py     # GitHub label colors, GraphQL helpers
 │       ├── llm.py        # LLM utilities
 │       ├── output.py     # Rich console formatting
 │       └── status.py     # Agent status management
@@ -198,16 +215,19 @@ softfoundry/
 │   └── {project}-{name}/ # Programmer worktrees
 ├── .env.example          # Environment template
 ├── ARCHITECTURE.md       # Detailed system architecture
+├── MCP_TOOLS.md          # MCP tool documentation by agent
 ├── claude-docs/          # Claude Agent SDK reference
 └── pyproject.toml
 
 ~/.softfoundry/           # User-level data
 ├── sessions/             # Session persistence (crash recovery)
-└── agents/               # Agent status files
+└── agents/               # Agent status and memory files
     └── {project}/
         ├── manager.status
-        ├── programmer-{name}.status
-        └── reviewer.status
+        ├── programmer-{name-slug}.status
+        ├── programmer-{name-slug}.memory.md
+        ├── reviewer-{name-slug}.status
+        └── reviewer-{name-slug}.memory.md
 ```
 
 ## GitHub Label Schema
@@ -216,10 +236,14 @@ The manager creates these labels on project setup:
 
 | Label | Purpose |
 |-------|---------|
+| `type:epic` | Top-level epic issue containing sub-tasks |
 | `assignee:{name}` | Task assignment (e.g., `assignee:alice-chen`) |
+| `reviewer:{name}` | PR reviewer assignment (e.g., `reviewer:rachel-review`) |
 | `status:pending` | Task not started |
 | `status:in-progress` | Task being worked on |
 | `status:in-review` | PR awaiting review |
+| `status:feedback-requested` | Reviewer requested changes on PR |
+| `status:approved` | Reviewer approved PR (ready to merge) |
 | `priority:high/medium/low` | Task priority |
 
 ## Session Management
@@ -230,10 +254,10 @@ If an agent crashes or is interrupted, it can resume from where it left off:
 
 ```bash
 # Resume automatically
-uv run python -m softfoundry.agents.manager --resume
+sf manager --session resume
 
-# Will prompt if a session exists
-uv run python -m softfoundry.agents.manager
+# Will prompt if a session exists (default behavior)
+sf manager
 ```
 
 ### Start Fresh
@@ -241,7 +265,7 @@ uv run python -m softfoundry.agents.manager
 To discard an existing session and start over:
 
 ```bash
-uv run python -m softfoundry.agents.manager --new-session
+sf manager --session new
 ```
 
 ### Clean Up
@@ -249,7 +273,7 @@ uv run python -m softfoundry.agents.manager --new-session
 To remove all session and status files:
 
 ```bash
-uv run softfoundry-clear
+sf clear
 ```
 
 ## Agent Health Monitoring
