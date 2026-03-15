@@ -358,7 +358,7 @@ sf reviewer \
 | `--epic` | GitHub issue number to use as the top-level epic (prompts to create one if not provided) |
 | `--verbosity` | Output level: minimal, medium, verbose (default: medium) |
 | `--max-iterations` | Safety limit for loop iterations (default: 100) |
-| `--session` | Session mode: auto (prompt), resume, or new (default: auto) |
+| `--session` | Session mode: auto (auto-resume if exists), resume, or new (default: auto) |
 
 **Programmer:**
 | Option | Description |
@@ -477,6 +477,7 @@ Manager agents also include:
 - `initialize_environment()` - Load .env and validate required variables
 - `get_anthropic_api_key()` - Get API key for direct Anthropic calls
 - `get_claude_code_token()` - Get OAuth token for Claude SDK
+- `MissingEnvironmentVariable` - Exception for missing required variables
 
 **`utils/status.py`** - Agent status file management:
 
@@ -484,6 +485,9 @@ Manager agents also include:
 - `update_status()` - Update status with atomic writes
 - `read_status()` - Read status data
 - `is_agent_stale()` - Check if agent is unresponsive (>5 min)
+- `is_agent_exited()` - Check if agent has exited
+- `get_agent_pid()` - Get agent's process ID from status file
+- `list_agent_statuses()` - List all agent status files for a project
 - `sanitize_name()` - Convert names to filename-safe slugs
 
 **`utils/llm.py`** - LLM utilities:

@@ -201,14 +201,12 @@ softfoundry/
 │   │   └── types.py        # Shared types
 │   ├── tui/              # Textual TUI
 │   │   ├── app.py        # Main Textual App
-│   │   ├── bridge.py     # Agent-to-TUI bridge
 │   │   ├── styles/       # TUI stylesheets
 │   │   └── widgets/      # TUI widget components
 │   └── utils/            # Shared utilities
 │       ├── env.py        # Environment variable loading (.env)
 │       ├── github.py     # GitHub label colors, GraphQL helpers
 │       ├── llm.py        # LLM utilities
-│       ├── output.py     # Rich console formatting
 │       └── status.py     # Agent status management
 ├── castings/             # Generated project workspaces
 │   ├── {project}/        # Main git clone

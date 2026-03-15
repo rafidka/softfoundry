@@ -168,7 +168,7 @@ STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 get_status_path(project, agent_type, name) -> Path
 update_status(status_path, status, details, **extra) -> None
 read_status(status_path) -> dict | None
-is_agent_stale(status_path, threshold=300) -> bool
+is_agent_stale(status_path, threshold_seconds=300) -> bool
 is_agent_exited(status_path) -> bool
 get_agent_pid(status_path) -> int | None
 ```
@@ -209,9 +209,11 @@ class SessionInfo(BaseModel):
     total_cost_usd: float | None = None
 
 class SessionManager:
-    def get_session(agent_type, agent_name) -> SessionInfo | None
-    def save_session(session_info) -> None
-    def delete_session(agent_type, agent_name) -> bool
+    def __init__(self, prefix: str) -> None
+    def get_session(self, agent_type, agent_name) -> SessionInfo | None
+    def save_session(self, session_info) -> None
+    def delete_session(self, agent_type, agent_name) -> bool
+    def create_session_info(self, session_id, agent_name, agent_type, num_turns, total_cost_usd=None) -> SessionInfo
 ```
 
 Session files are named: `{agent_type}-{name-slug}-{project}.json`
@@ -283,73 +285,63 @@ sf clear --dry-run    # Preview only
 
 ### Common Agent Pattern
 
-All agents follow a similar pattern:
+All agents subclass the `Agent` base class from `base.py`, which handles session
+management, TUI setup, status files, and the main loop. Subclasses implement four
+abstract methods:
 
 ```python
-async def run_agent(...):
-    # 1. Initialize status file
-    status_path = get_status_path(project, agent_type, name)
-    update_status(status_path, "starting", "Initializing")
-    
-    # 2. Session management
-    session_manager = SessionManager(project)
-    existing_session = session_manager.get_session(...)
-    # Handle resume/new session
-    
-    # 3. Check for crash recovery
-    existing_status = read_status(status_path)
-    resume_context = ""
-    if existing_status and existing_status.get("current_issue"):
-        resume_context = f"Previously working on #{issue}..."
-    
-    # 4. Build options and connect
-    options = ClaudeAgentOptions(
-        allowed_tools=[...],
-        permission_mode="acceptEdits",
-        system_prompt=system_prompt,
-        resume=current_session_id,
-        cwd=working_directory,
-    )
-    
-    # 5. Main loop
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(initial_prompt)
-        
-        while iteration < max_iterations:
-            async for message in client.receive_response():
-                # Handle messages
-                if isinstance(message, ResultMessage):
-                    session_manager.save_session(...)
-            
-            # User questions handled by ask_user MCP tool (blocks turn)
-            # Between turns: check pending input, idle wait, or continue
-            await client.query("Continue...")
+from claude_agent_sdk import ResultMessage
+from softfoundry.agents.base import Agent, AgentConfig
+
+class MyAgent(Agent):
+    def __init__(self, project: str, **kwargs):
+        config = AgentConfig(
+            namespace=project,
+            agent_type="myagent",
+            agent_name="default",
+            allowed_tools=["Read", "Edit", "Bash", ...],
+            permission_mode="acceptEdits",
+            **kwargs,
+        )
+        super().__init__(config)
+
+    def get_system_prompt(self) -> str:
+        return "You are a helpful agent..."
+
+    def get_initial_prompt(self) -> str:
+        return "Start working on the task."
+
+    def is_complete(self, result: ResultMessage) -> bool:
+        return result.result is not None and "done" in result.result.lower()
+
+    def get_continuation_prompt(self) -> str:
+        return "Continue working."
+
+# Run the agent (creates TUI, runs loop, handles shutdown)
+agent = MyAgent(project="myproject")
+asyncio.run(agent.run())
 ```
 
-### Signal Handling
+The `Agent` base class drives the loop:
 
-All agents implement graceful shutdown:
+1. Creates the Textual TUI (`SoftFoundryApp`) and starts the agent worker
+2. Resolves session (auto-resume if exists, or start new)
+3. Builds `ClaudeAgentOptions` with system prompt, tools, MCP servers, and session ID
+4. Runs the main loop: `query()` -> `receive_response()` -> check `is_complete()` -> continue
+5. Handles shutdown via `try/except KeyboardInterrupt` with `on_shutdown()` hook
 
-```python
-class GracefulExit(Exception): pass
-class ImmediateExit(Exception): pass
+### Shutdown Handling
 
-def setup_signal_handlers():
-    state = {"shutdown_requested": False, "query_running": False}
-    
-    def handler(signum, frame):
-        if state["shutdown_requested"]:
-            raise ImmediateExit()  # Second Ctrl+C
-        else:
-            state["shutdown_requested"] = True
-            if state["query_running"]:
-                print("Waiting for query to complete...")
-            else:
-                raise GracefulExit()
-    
-    signal.signal(signal.SIGINT, handler)
-    return state
-```
+The `Agent` base class handles shutdown via `KeyboardInterrupt` at each entry point
+(`run()`, `run_session()`, `_agent_worker()`). The Textual TUI intercepts Ctrl+C
+and Ctrl+D:
+
+- **Ctrl+C**: Raises `KeyboardInterrupt`, caught by the agent loop which calls
+  `on_shutdown()` to update the status file to `exited:terminated`
+- **Ctrl+D**: Textual's built-in exit action, closes the TUI gracefully
+
+Agents can override `on_shutdown()`, `on_error()`, and `on_complete()` hooks to
+customize exit behavior (e.g., releasing claimed tasks, updating labels).
 
 ---
 
@@ -482,16 +474,16 @@ git branch -D feature/issue-3-auth
 │  8. Programmer commits + pushes                                   │
 │     └─► git add . && git commit && git push -u origin ...       │
 │                                                                   │
-│  7. Programmer creates PR                                         │
+│  9. Programmer creates PR                                         │
 │     └─► gh pr create --title "..." --body "Closes #3"           │
 │                                                                   │
-│  8. Reviewer reviews PR                                           │
+│ 10. Reviewer reviews PR                                           │
 │     └─► gh pr diff 5 (analyze changes)                          │
 │                                                                   │
-│  9. Reviewer approves + merges                                    │
+│ 11. Reviewer approves + merges                                    │
 │     └─► gh pr review 5 --approve && gh pr merge 5 --squash      │
 │                                                                   │
-│ 10. Issue auto-closed by "Closes #3"                              │
+│ 12. Issue auto-closed by "Closes #3"                              │
 │                                                                   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -583,7 +575,7 @@ All agents use `ask_user` MCP tools for explicit user interaction:
 │       │                                                      │
 │       ├─► Found + --resume: Load session_id                 │
 │       │                                                      │
-│       ├─► Found + prompt: Ask user to resume                │
+│       ├─► Found + auto: Auto-resume session                 │
 │       │                                                      │
 │       └─► Found + --new-session: Delete session             │
 │                                                              │
@@ -611,13 +603,16 @@ All agents use `ask_user` MCP tools for explicit user interaction:
 ### Stale Agent Detection
 
 ```python
-def is_agent_stale(status_path, threshold=300):
+def is_agent_stale(status_path, threshold_seconds=300):
     data = read_status(status_path)
     if not data:
         return True
-    last_update = datetime.fromisoformat(data["last_update"])
-    age = (datetime.now() - last_update).total_seconds()
-    return age > threshold  # Default 5 minutes
+    try:
+        last_update = datetime.fromisoformat(data["last_update"])
+        age = (datetime.now() - last_update).total_seconds()
+        return age > threshold_seconds  # Default 5 minutes
+    except (KeyError, ValueError):
+        return True
 ```
 
 ---
@@ -659,9 +654,10 @@ Status files are stored in user's home directory:
 To add a new agent type:
 
 1. Create `src/softfoundry/agents/newagent.py`
-2. Follow the common agent pattern (see above)
-3. Define system prompt and workflow
-4. Add CLI entry point in `pyproject.toml`
+2. Subclass `Agent` from `base.py` and implement the four abstract methods:
+   `get_system_prompt()`, `get_initial_prompt()`, `is_complete()`, `get_continuation_prompt()`
+3. Optionally override hooks: `on_complete()`, `on_shutdown()`, `on_error()`, `get_idle_interval()`
+4. Add a CLI command in `src/softfoundry/cli/` and register it in `pyproject.toml`
 
 ### MCP Orchestrator
 

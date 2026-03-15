@@ -104,7 +104,7 @@ class SoftFoundryApp(App[None]):
         self._agent_coroutine = agent_coroutine
         self._sidebar_user_hidden = False  # User explicitly hid sidebar
 
-        # Message dispatch state (moved from AgentBridge)
+        # Message dispatch state
         self.verbosity: str = "medium"
         self._pending_tools: dict[str, str] = {}  # tool_use_id -> tool_name
 
