@@ -329,11 +329,6 @@ class SoftFoundryApp(App[None]):
             status_bar.status = status
         except Exception:
             pass
-        try:
-            input_area = self.query_one(InputArea)
-            input_area.status = status
-        except Exception:
-            pass
 
     def enable_input(self) -> None:
         """Enable the input area."""

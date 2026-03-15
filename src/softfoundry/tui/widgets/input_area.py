@@ -1,4 +1,4 @@
-"""Rich text input area with status indicator and dual-mode behavior.
+"""Rich text input area with dual-mode behavior.
 
 Modes:
 - Normal: input sends a user message (or interrupts if agent is busy)
@@ -18,16 +18,6 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static, TextArea
-
-STATUS_COLORS = {
-    "idle": "dim",
-    "starting": "dim",
-    "working": "yellow",
-    "thinking": "magenta",
-    "waiting": "cyan",
-    "interrupting": "yellow",
-    "error": "red",
-}
 
 
 class _SubmitTextArea(TextArea):
@@ -58,17 +48,13 @@ class _SubmitTextArea(TextArea):
 
 
 class InputArea(Widget):
-    """Composite input widget with status indicator and text area.
-
-    Layout:
-        [status] context_label > (text area)
+    """Composite input widget with text area and disabled state.
 
     Dual-mode:
-    - Normal: label shows "> " — input will be sent as user message
-    - Question: label shows "Answer > " with cyan styling
+    - Normal: input will be sent as user message
+    - Question: input answers the pending ask_user question
     """
 
-    status: reactive[str] = reactive("idle")
     question_mode: reactive[bool] = reactive(False)
     disabled_mode: reactive[bool] = reactive(False)
 
@@ -85,45 +71,19 @@ class InputArea(Widget):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="input-container"):
-            # yield Static(id="input-label")
             yield _SubmitTextArea(
                 id="input-area", language=None, show_line_numbers=False
             )
             yield Static(id="input-disabled-label")
 
     def on_mount(self) -> None:
-        # self._update_label()
         self._update_disabled_state()
         # Focus the text area
         text_area = self.query_one("#input-area", _SubmitTextArea)
         text_area.focus()
 
-    def watch_status(self, status: str) -> None:
-        # self._update_label()
-        pass
-
-    def watch_question_mode(self, question_mode: bool) -> None:
-        # self._update_label()
-        pass
-
     def watch_disabled_mode(self, disabled_mode: bool) -> None:
         self._update_disabled_state()
-
-    # def _update_label(self) -> None:
-    #     """Update the input label based on current mode and status."""
-    #     try:
-    #         label = self.query_one("#input-label", Static)
-    #     except Exception:
-    #         return
-
-    #     color = STATUS_COLORS.get(self.status, "dim")
-
-    #     if self.question_mode:
-    #         label.update(f"[{color}]\\[{self.status}][/{color}] [cyan]Answer >[/cyan] ")
-    #         label.add_class("waiting")
-    #     else:
-    #         label.update(f"[{color}]\\[{self.status}][/{color}] > ")
-    #         label.remove_class("waiting")
 
     def _update_disabled_state(self) -> None:
         """Show/hide text area vs disabled label."""
