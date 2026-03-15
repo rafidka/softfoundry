@@ -58,7 +58,6 @@ softfoundry/
 │   ├── tui/                   # Textual TUI
 │   │   ├── __init__.py
 │   │   ├── app.py             # Main Textual App
-│   │   ├── bridge.py          # Agent-to-TUI bridge
 │   │   ├── styles/app.tcss    # TUI stylesheet
 │   │   └── widgets/           # TUI widget components
 │   │       ├── __init__.py
@@ -72,7 +71,6 @@ softfoundry/
 │       ├── env.py             # Environment variable loading (.env)
 │       ├── github.py          # GitHub label colors, GraphQL helpers, signatures
 │       ├── llm.py             # LLM utilities
-│       ├── output.py          # Rich message formatting
 │       └── status.py          # Agent status file management
 ├── castings/                  # Generated project workspaces
 │   ├── {project}/             # Main git clone
@@ -173,7 +171,6 @@ from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
-from softfoundry.utils.output import create_printer
 from softfoundry.agents.sessions import SessionManager
 ```
 
@@ -488,12 +485,6 @@ Manager agents also include:
 - `read_status()` - Read status data
 - `is_agent_stale()` - Check if agent is unresponsive (>5 min)
 - `sanitize_name()` - Convert names to filename-safe slugs
-
-**`utils/output.py`** - Rich console output:
-
-- `MessagePrinter` - Prints SDK messages with configurable verbosity
-- `Verbosity` - Enum (minimal, medium, verbose)
-- `create_printer()` - Factory function
 
 **`utils/llm.py`** - LLM utilities:
 

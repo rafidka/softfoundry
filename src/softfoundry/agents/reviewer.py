@@ -19,7 +19,7 @@ from softfoundry.agents.prompts import (
     project_info_prompt,
 )
 from softfoundry.mcp import create_orchestrator_server
-from softfoundry.tui import AgentBridge, SoftFoundryApp
+from softfoundry.tui import SoftFoundryApp
 from softfoundry.utils.github import LABEL_COLORS
 from softfoundry.utils.status import sanitize_name
 
@@ -336,15 +336,20 @@ Check the current state of PR #{pr_num} and continue from where you left off."""
 
         if reason == "review_complete":
             self.update_status("exited:success", "PR review completed")
-            self.printer.console.print("[bold green]PR review completed![/bold green]")
+            if self._app:
+                self._app.add_lifecycle_message("PR review completed!", "success")
         elif reason == "no_prs":
             self.update_status("exited:success", "No PRs available to review")
-            self.printer.console.print("[yellow]No PRs available to review.[/yellow]")
+            if self._app:
+                self._app.add_lifecycle_message(
+                    "No PRs available to review.", "warning"
+                )
         elif reason == "all_done":
             self.update_status("exited:success", "All epic work completed")
-            self.printer.console.print(
-                "[bold green]All PRs reviewed! Epic complete.[/bold green]"
-            )
+            if self._app:
+                self._app.add_lifecycle_message(
+                    "All PRs reviewed! Epic complete.", "success"
+                )
         else:
             super().on_complete()
 
@@ -401,92 +406,74 @@ async def run_reviewer(
         print(agent.get_initial_prompt())
         return
 
-    # Create the first agent BEFORE the TUI starts (session resolution
-    # may use bare input() for interactive prompts, which requires a
-    # normal terminal — not the Textual TUI).
-    first_agent = ReviewerAgent(
-        name=name,
-        github_repo=github_repo,
-        clone_path=clone_path,
-        project=project,
-        epic=epic,
-        resume=resume,
-        new_session=new_session,
-        verbosity=verbosity,
-        max_iterations=max_iterations,
-    )
-
-    async def _multi_session_worker(app: SoftFoundryApp, bridge: AgentBridge) -> None:
+    async def _multi_session_worker(app: SoftFoundryApp) -> None:
         """Multi-session worker coroutine for persistent TUI.
 
         Runs inside the Textual event loop as an async worker.
-        Uses the pre-created first agent, then creates fresh agents
-        for subsequent reviews.
+        Creates fresh agents for each review.
         """
         run_number = 0
-        agent = first_agent
 
         while True:
             run_number += 1
 
             if run_number > 1:
-                bridge.show_session_separator(f"Review #{run_number}")
-                agent = ReviewerAgent(
-                    name=name,
-                    github_repo=github_repo,
-                    clone_path=clone_path,
-                    project=project,
-                    epic=epic,
-                    resume=False,
-                    new_session=True,
-                    verbosity=verbosity,
-                    max_iterations=max_iterations,
-                )
+                app.add_session_separator(f"Review #{run_number}")
+
+            agent = ReviewerAgent(
+                name=name,
+                github_repo=github_repo,
+                clone_path=clone_path,
+                project=project,
+                epic=epic,
+                resume=resume if run_number == 1 else False,
+                new_session=new_session if run_number == 1 else True,
+                verbosity=verbosity,
+                max_iterations=max_iterations,
+            )
 
             try:
-                await agent.run_session(app, bridge)
+                await agent.run_session(app)
             except KeyboardInterrupt:
-                bridge.show_lifecycle_message(
+                app.add_lifecycle_message(
                     "Interrupted. Press Ctrl+D to exit.", "warning"
                 )
-                bridge.enable()
+                app.enable_input()
                 return
             except Exception as e:
-                bridge.show_lifecycle_message(f"Agent error: {e}", "error")
-                bridge.show_lifecycle_message("Press Ctrl+D to exit.", "info")
-                bridge.enable()
+                app.add_lifecycle_message(f"Agent error: {e}", "error")
+                app.add_lifecycle_message("Press Ctrl+D to exit.", "info")
+                app.enable_input()
                 return
 
             exit_reason = agent.exit_reason
 
             if exit_reason in ("all_done", "success"):
-                bridge.show_lifecycle_message(
+                app.add_lifecycle_message(
                     "All reviews completed. Press Ctrl+D to exit.", "success"
                 )
-                bridge.enable()
+                app.enable_input()
                 return  # TUI stays open for user to review
 
             if exit_reason in ("review_complete", "no_prs"):
                 # Show countdown in TUI
-                bridge.show_lifecycle_message(
-                    f"Next review in {task_delay}s...", "info"
-                )
-                bridge.status = "idle"
+                app.add_lifecycle_message(f"Next review in {task_delay}s...", "info")
+                app.update_status("idle")
                 try:
                     await asyncio.sleep(task_delay)
                 except (KeyboardInterrupt, asyncio.CancelledError):
-                    bridge.show_lifecycle_message(
+                    app.add_lifecycle_message(
                         "Interrupted. Press Ctrl+D to exit.", "warning"
                     )
-                    bridge.enable()
+                    app.enable_input()
                     return
                 continue
 
             # Unknown exit reason — stop
-            bridge.show_lifecycle_message(
+            app.add_lifecycle_message(
                 f"Agent exited ({exit_reason}). Press Ctrl+D to exit.", "warning"
             )
-            bridge.enable()
+            app.enable_input()
             return
 
     # Create the persistent TUI app
@@ -496,10 +483,9 @@ async def run_reviewer(
         project=project,
         epic_number=epic,
         on_input=lambda text: None,  # Rewired per-session by _attach_tui
-        agent_coroutine=lambda: _multi_session_worker(app, bridge),
+        agent_coroutine=lambda: _multi_session_worker(app),
     )
-    bridge = AgentBridge(app=app)
-    bridge._verbosity = verbosity
+    app.verbosity = verbosity
 
     try:
         await app.run_async()

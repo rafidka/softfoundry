@@ -163,12 +163,14 @@ cat > {self._status_path} << 'EOF'
   "pid": {os.getpid()}
 }}
 EOF
+```
 
 ## Phase 1: Setup
 
 **1.1 Clone** (if needed): `git clone https://github.com/{self.github_repo} {self.clone_path}`
 
-**1.2 PROJECT.md**: If missing, ask the user about scope/tech/features, write it, commit and push.
+**1.2 PROJECT.md**: If missing, use `mcp__user__ask_user` to ask the user about \
+scope/tech/features, write it, commit and push.
 
 **1.3 Create Labels**: Use `mcp__orchestrator__create_label` for each:
 - `type:epic` (color {LABEL_COLORS["type_epic"]})
@@ -182,11 +184,12 @@ EOF
 - `priority:low` (color {LABEL_COLORS["priority_low"]}).
 
 **1.4 Find or Create Epic**:
-- If an epic was provided: verify it exists with `mcp__orchestrator__get_epic_status`,
+- If an epic was provided: verify it exists with `mcp__orchestrator__get_epic_status`, \
   add `type:epic` label if needed, read its goals.
-- If no epic was provided, start a discussion with the user to understand what they want
-  to work on. Maintain an interactive discussion with the user until the user is
-  satisfied, then create the epic accordingly.
+- If no epic was provided, use `mcp__user__ask_user` to start a discussion with the \
+  user to understand what they want to work on. Keep an interactive discussion with \
+  the user (using `mcp__user__ask_user` for each question) until the user is satisfied, \
+  then create the epic accordingly.
 
 ## Phase 2: Plan Tasks
 
@@ -198,9 +201,10 @@ Dependency guidelines:
 - List only direct dependencies per task (not transitive)
 - Tasks without dependencies can be worked in parallel
 
-Ask the user to review the plan and confirm it. If the user is not happy with the plan,
-keep an interactive discussion until the user is satisfied. When the user confirms the
-plan, proceed with creating the sub-issues.
+Use `mcp__user__ask_user` to present the plan and ask the user to review and confirm \
+it.  If the user is not happy with the plan, keep an interactive discussion (using \
+`mcp__user__ask_user` for each question) until the user is satisfied. When the user \
+confirms the plan, proceed with creating the sub-issues.
 
 **2.2 Create Sub-Issues**:
 
@@ -224,7 +228,7 @@ uv run sf programmer \\
     --epic EPIC_NUMBER
 
 # Reviewer
-uv run sf reviewer 
+uv run sf reviewer \\
     --name "<Reviewer Name>" \\
     --github-repo {self.github_repo} \\
     --clone-path {self.clone_path} \\
@@ -239,7 +243,7 @@ Explain to the user that:
 - Each agent needs a unique name
 - Each agent needs to be started in a separate terminal
 
-Ask user to type "ready" when agents are started.
+Use `mcp__user__ask_user` to ask the user to confirm when agents are started.
 
 ## Phase 4: Monitor
 
@@ -278,13 +282,15 @@ Verify this issue exists and use it as the parent for all sub-tasks.
 """
         else:
             epic_instruction = """
-No epic was provided. You will need to 
-1. Use the mcp__orchestrator__list_issues tool to check if there's already an active
+No epic was provided. You will need to
+1. Use the mcp__orchestrator__list_issues tool to check if there's already an active \
    epic (open issue with `type:epic` label).
-2. If yes, ask the user if they want to work on that epic or create a new one.
-3. If no, start a discussion with the user to understand what they want to work on. Keep
-   an interactive discussion with the user until the user is satisfied, then create the
-   epic accordingly.
+2. If yes, use `mcp__user__ask_user_choice` to ask the user if they want to work on \
+   that epic or create a new one.
+3. If no, use `mcp__user__ask_user` to start a discussion with the user to understand \
+   what they want to work on. Keep an interactive discussion (using \
+   `mcp__user__ask_user` for each question) until the user is satisfied, then create \
+   the epic accordingly.
 """
 
         return f"""Start managing the {self.project} project.
@@ -344,9 +350,10 @@ You were doing: {existing_status.get("details")}""")
     def on_complete(self) -> None:
         """Handle completion with custom message."""
         super().on_complete()
-        self.printer.console.print(
-            "[bold green]Project completed successfully![/bold green]"
-        )
+        if self._app:
+            self._app.add_lifecycle_message(
+                "Project completed successfully!", "success"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

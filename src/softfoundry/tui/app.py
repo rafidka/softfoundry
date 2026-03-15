@@ -7,9 +7,20 @@ input area (bottom), status bar (footer).
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage as SDKResultMessage,
+    SystemMessage as SDKSystemMessage,
+    TextBlock,
+    ThinkingBlock as SDKThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -92,6 +103,10 @@ class SoftFoundryApp(App[None]):
         self._on_input = on_input
         self._agent_coroutine = agent_coroutine
         self._sidebar_user_hidden = False  # User explicitly hid sidebar
+
+        # Message dispatch state (moved from AgentBridge)
+        self.verbosity: str = "medium"
+        self._pending_tools: dict[str, str] = {}  # tool_use_id -> tool_name
 
     def compose(self) -> ComposeResult:
         # Horizontal split: left column (stream + input) | sidebar
@@ -189,7 +204,117 @@ class SoftFoundryApp(App[None]):
             except Exception as e:
                 self.add_lifecycle_message(f"Agent error: {e}", "error")
 
-    # ─── Public API (called by AgentBridge) ──────────────────────────────────
+    # ─── Public API ────────────────────────────────────────────────────────────
+
+    def add_message(self, message: Any) -> None:
+        """Translate an SDK message into TUI widget(s).
+
+        Dispatches by message type, creating the appropriate widgets.
+
+        Args:
+            message: Any claude_agent_sdk message type.
+        """
+        if isinstance(message, AssistantMessage):
+            self._handle_assistant_message(message)
+        elif isinstance(message, UserMessage):
+            self._handle_user_message(message)
+        elif isinstance(message, SDKSystemMessage):
+            self._handle_system_message(message)
+        elif isinstance(message, SDKResultMessage):
+            self._handle_result_message(message)
+
+    def _handle_assistant_message(self, message: AssistantMessage) -> None:
+        """Process an assistant message — dispatch each content block."""
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                if block.text.strip():
+                    self.add_text_message(block.text)
+            elif isinstance(block, SDKThinkingBlock):
+                if self.verbosity != "minimal":
+                    self.add_thinking_block(block.thinking)
+            elif isinstance(block, ToolUseBlock):
+                self._handle_tool_use(block)
+
+    def _handle_tool_use(self, block: ToolUseBlock) -> None:
+        """Add a tool use block in running state."""
+        tool_input = block.input if isinstance(block.input, dict) else {}
+        self._pending_tools[block.id] = block.name
+
+        if self.verbosity == "minimal":
+            self.add_lifecycle_message(f"Tool: {block.name}", "info")
+        else:
+            self.add_tool_block(block.id, block.name, tool_input)
+
+    def _handle_user_message(self, message: UserMessage) -> None:
+        """Process a user message."""
+        if self.verbosity == "minimal":
+            return
+
+        content = message.content
+        if isinstance(content, str):
+            self.add_text_message(f"User: {content}")
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, ToolResultBlock):
+                    self._handle_tool_result(block)
+                elif isinstance(block, TextBlock):
+                    if block.text.strip():
+                        self.add_text_message(f"User: {block.text}")
+
+    def _handle_tool_result(self, block: ToolResultBlock) -> None:
+        """Match a tool result to its tool use block."""
+        if self.verbosity == "minimal":
+            return
+
+        tool_use_id = block.tool_use_id
+        is_error = block.is_error or False
+        content_str = self._format_tool_result_content(block.content)
+
+        self.update_tool_result(tool_use_id, content_str, is_error)
+
+        # Clean up tracking
+        self._pending_tools.pop(tool_use_id, None)
+
+    def _handle_system_message(self, message: SDKSystemMessage) -> None:
+        """Process a system message."""
+        if self.verbosity == "minimal":
+            return
+        # Skip init messages — they're SDK initialization noise
+        if message.subtype == "init":
+            return
+        self.add_system_block(message.subtype)
+
+    def _handle_result_message(self, message: SDKResultMessage) -> None:
+        """Process a result message (turn completion)."""
+        self.add_result_block(
+            message.is_error,
+            message.subtype,
+            message.duration_ms,
+            message.total_cost_usd,
+            message.num_turns,
+        )
+
+    @staticmethod
+    def _format_tool_result_content(
+        content: str | list[dict[str, Any]] | Any,
+    ) -> str:
+        """Format tool result content to a string."""
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    else:
+                        parts.append(json.dumps(item, default=str))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        elif content is None:
+            return ""
+        return str(content)
 
     def update_status(self, status: str) -> None:
         """Update the global agent status (sidebar + status bar + input)."""

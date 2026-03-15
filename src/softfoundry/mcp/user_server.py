@@ -16,7 +16,7 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from softfoundry.tui.bridge import AgentBridge
+from softfoundry.tui.app import SoftFoundryApp
 
 
 def _success(data: str) -> dict[str, Any]:
@@ -40,24 +40,24 @@ class UserInputServer:
 
     Lifecycle:
         1. Created by create_user_server() before the TUI starts
-        2. Bridge is set via set_bridge() after TUI initialization
+        2. App is set via set_app() after TUI initialization
         3. Tool handlers call _wait_for_input() which blocks until user responds
         4. Agent loop calls provide_response() when user submits during question mode
     """
 
     def __init__(self) -> None:
-        self._bridge: AgentBridge | None = None
+        self._app: SoftFoundryApp | None = None
         self._event: asyncio.Event | None = None
         self._response: str | None = None
         self._waiting: bool = False
 
-    def set_bridge(self, bridge: AgentBridge) -> None:
-        """Set the TUI bridge for displaying questions.
+    def set_app(self, app: SoftFoundryApp) -> None:
+        """Set the TUI app for displaying questions.
 
         Args:
-            bridge: The AgentBridge connected to the running TUI app.
+            app: The SoftFoundryApp instance.
         """
-        self._bridge = bridge
+        self._app = app
 
     @property
     def is_waiting(self) -> bool:
@@ -93,9 +93,9 @@ class UserInputServer:
         self._response = None
         self._waiting = True
 
-        # Display question in TUI via bridge
-        if self._bridge:
-            self._bridge.show_question(question, options)
+        # Display question in TUI
+        if self._app:
+            self._app.add_question_block(question, options)
 
         try:
             await self._event.wait()
@@ -103,8 +103,8 @@ class UserInputServer:
         finally:
             self._waiting = False
             self._event = None
-            if self._bridge:
-                self._bridge.clear_question()
+            if self._app:
+                self._app.clear_question_mode()
 
 
 def create_user_server(name: str = "user") -> tuple[Any, UserInputServer]:

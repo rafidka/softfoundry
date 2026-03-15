@@ -216,19 +216,13 @@ class SessionManager:
 
 Session files are named: `{agent_type}-{name-slug}-{project}.json`
 
-#### Output Formatting (`output.py`)
+#### Message Display (`tui/app.py`)
 
-Rich console output with configurable verbosity.
+The `SoftFoundryApp` handles all SDK message display via `add_message()`, with configurable verbosity:
 
-```python
-class Verbosity(Enum):
-    MINIMAL = "minimal"   # Tool names only
-    MEDIUM = "medium"     # Tool names + key parameters
-    VERBOSE = "verbose"   # Full input/output
-
-class MessagePrinter:
-    def print_message(message: Any) -> None
-```
+- `"minimal"` - Tool names only
+- `"medium"` - Tool names + key parameters
+- `"verbose"` - Full input/output
 
 Handles all SDK message types:
 - `AssistantMessage` - Claude's responses

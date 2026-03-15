@@ -24,11 +24,10 @@ from claude_agent_sdk import (
 from pydantic import BaseModel, Field
 
 from softfoundry.agents.memory import get_memory_path, read_memory
-from softfoundry.agents.sessions import SessionManager, format_session_info
+from softfoundry.agents.sessions import SessionManager
 from softfoundry.mcp.user_server import UserInputServer, create_user_server
-from softfoundry.tui import AgentBridge, SoftFoundryApp
+from softfoundry.tui import SoftFoundryApp
 from softfoundry.utils.env import get_claude_code_token
-from softfoundry.utils.output import MessagePrinter, create_printer
 from softfoundry.utils.status import get_status_path, read_status, update_status
 
 # Heartbeat interval for status file updates (seconds)
@@ -154,13 +153,10 @@ class Agent(ABC):
             config: The agent configuration.
         """
         self.config = config
-        self._printer = create_printer(config.verbosity)
 
         # Session management
         self._session_manager = SessionManager(prefix=config.namespace)
         self._session_id: str | None = None
-        if not config.dry_mode:
-            self._resolve_session()
 
         # Status management
         self._status_path = get_status_path(
@@ -185,8 +181,7 @@ class Agent(ABC):
         self._iteration = 0
         self._last_assistant_text = ""
 
-        # TUI bridge and SDK client (set up later in run())
-        self._bridge: AgentBridge | None = None
+        # TUI app and SDK client (set up later in run())
         self._app: SoftFoundryApp | None = None
         self._client: ClaudeSDKClient | None = None
 
@@ -210,12 +205,14 @@ class Agent(ABC):
     def _resolve_session(self) -> None:
         """Handle session resume/new logic based on config flags.
 
-        This method is called during __init__ to determine if we should
-        resume an existing session or start a new one.
+        Called after TUI is ready (inside the agent worker or run_session),
+        so it can display messages via the TUI.
 
         Raises:
             ValueError: If resume=True but no existing session found.
         """
+        assert self._app is not None
+
         existing = self._session_manager.get_session(
             self.config.agent_type,
             self.config.agent_name,
@@ -227,24 +224,20 @@ class Agent(ABC):
                     self.config.agent_type,
                     self.config.agent_name,
                 )
-                self._printer.console.print("Deleted existing session.")
+                self._app.add_lifecycle_message("Deleted existing session.", "info")
             elif self.config.resume:
                 self._session_id = existing.session_id
-                self._printer.console.print("Resuming previous session...")
+                self._app.add_lifecycle_message("Resuming previous session...", "info")
             else:
-                # Interactive prompt
-                self._printer.console.print("Found previous session:")
-                print(format_session_info(existing))
-                response = input("Continue previous session? [y/N]: ").strip().lower()
-                if response == "y":
-                    self._session_id = existing.session_id
-                    self._printer.console.print("Resuming session...")
-                else:
-                    self._session_manager.delete_session(
-                        self.config.agent_type,
-                        self.config.agent_name,
-                    )
-                    self._printer.console.print("Starting new session...")
+                # Auto-resume: in TUI mode we don't have interactive prompts,
+                # so we resume if a session exists
+                self._session_id = existing.session_id
+                self._app.add_lifecycle_message(
+                    f"Resuming previous session "
+                    f"({existing.num_turns} turns, "
+                    f"${existing.total_cost_usd:.2f})...",
+                    "info",
+                )
         elif self.config.resume:
             raise ValueError(
                 f"No existing session found for {self.config.agent_name}. "
@@ -439,40 +432,39 @@ class Agent(ABC):
     def on_complete(self) -> None:
         """Called when is_complete() returns True.
 
-        Default implementation updates the status file and prints a message.
+        Default implementation updates the status file and shows a message.
         """
         self.update_status("exited:success", "Completed successfully")
-        self._printer.console.print("[bold green]Agent completed![/bold green]")
+        if self._app:
+            self._app.add_lifecycle_message("Agent completed!", "success")
 
     def on_max_iterations(self) -> None:
         """Called when max_iterations is reached.
 
-        Default implementation updates the status file and prints a warning.
+        Default implementation updates the status file and shows a warning.
         """
         self.update_status(
             "exited:terminated",
             f"Reached max iterations: {self.config.max_iterations}",
         )
-        self._printer.console.print(
-            f"[yellow]Reached maximum iterations ({self.config.max_iterations}). "
-            f"Exiting.[/yellow]"
-        )
+        if self._app:
+            self._app.add_lifecycle_message(
+                f"Reached maximum iterations ({self.config.max_iterations}). Exiting.",
+                "warning",
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # CONCRETE METHODS - Provided by framework
     # ─────────────────────────────────────────────────────────────────────────
 
     @property
-    def printer(self) -> MessagePrinter | AgentBridge:
-        """Access the message printer for custom output.
-
-        Returns either the original MessagePrinter or the AgentBridge
-        (which provides the same print_message interface).
+    def app(self) -> SoftFoundryApp | None:
+        """Access the TUI app for custom output.
 
         Returns:
-            The printer instance configured for this agent.
+            The SoftFoundryApp instance, or None before TUI setup.
         """
-        return self._printer
+        return self._app
 
     @property
     def memory_path(self) -> Path | None:
@@ -497,12 +489,28 @@ class Agent(ABC):
         # Add ask_user instructions
         prompt += """
 
-## User Interaction
+## User Interaction (CRITICAL)
 
-When you need to ask the user a question, get clarification, or need them to make a decision, \
-use the `ask_user` or `ask_user_choice` tool instead of writing the question in your text response. \
-These tools will display the question in the TUI and wait for the user's answer, which is returned \
-as the tool result. Do NOT ask questions in plain text — the user cannot respond to those."""
+You have two MCP tools for interacting with the user:
+- `mcp__user__ask_user` — ask a free-text question and wait for the response
+- `mcp__user__ask_user_choice` — present a list of options for the user to choose from
+
+**You MUST use these tools whenever you need ANY response from the user.** Writing \
+questions in your text response does NOT work — the user cannot reply to plain text. \
+Only these tools create the interactive prompt that lets the user type a response. If \
+you write a question in plain text, the agent loop will immediately continue without \
+waiting for the user's answer, breaking the conversation flow.
+
+Use `mcp__user__ask_user` when you need:
+- Project scope, features, or requirements
+- Confirmation or approval of a plan
+- Clarification on any topic
+- The user to acknowledge something (e.g., "ready to proceed?")
+
+Use `mcp__user__ask_user_choice` when you need:
+- A selection from specific options (e.g., "Resume or start new?")
+- Yes/No decisions
+- Any choice from a predefined list"""
 
         if self._memory_path is None:
             return prompt
@@ -572,8 +580,8 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         if self._is_turn_running and self._client:
             # Agent is busy - interrupt and process the input
-            if self._bridge:
-                self._bridge.show_lifecycle_message(
+            if self._app:
+                self._app.add_lifecycle_message(
                     f"Interrupting with: {text[:50]}{'...' if len(text) > 50 else ''}",
                     "info",
                 )
@@ -583,8 +591,8 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
     async def _interrupt_current_turn(self) -> None:
         """Interrupt the current turn."""
         if self._client:
-            if self._bridge:
-                self._bridge.status = "interrupting"
+            if self._app:
+                self._app.update_status("interrupting")
             await self._client.interrupt()
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -608,24 +616,21 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             ]
         )
 
-    def _attach_tui(self, app: SoftFoundryApp, bridge: AgentBridge) -> None:
-        """Attach this agent to an existing TUI app and bridge.
+    def _attach_tui(self, app: SoftFoundryApp) -> None:
+        """Attach this agent to an existing TUI app.
 
         Used by persistent TUI mode where the TUI outlives individual
         agent sessions.
 
         Args:
             app: The Textual app to use.
-            bridge: The bridge to use for TUI communication.
         """
         self._app = app
-        self._bridge = bridge
-        self._bridge._verbosity = self.config.verbosity
-        self._printer = self._bridge  # type: ignore[assignment]
+        self._app.verbosity = self.config.verbosity
 
-        # Reconnect user server to the bridge
+        # Reconnect user server to the app
         if self._user_server:
-            self._user_server.set_bridge(self._bridge)
+            self._user_server.set_app(self._app)
 
         # Rewire the app's input callback to this agent
         self._app._on_input = self._handle_user_input
@@ -635,10 +640,9 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         This method:
         1. Creates the user input MCP server and injects it into config
-        2. Builds the Claude SDK options
-        3. Creates the Textual TUI app and bridge
-        4. Connects the user server to the bridge
-        5. Runs the agent loop as a Textual worker inside the app
+        2. Creates the Textual TUI app
+        3. Connects the user server to the app
+        4. Runs the agent loop as a Textual worker inside the app
 
         The TUI stays open after completion so the user can review the
         conversation. Press Ctrl+D to exit.
@@ -647,12 +651,6 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             Exception: Re-raises any exception after calling on_error().
         """
         self._setup_user_server()
-
-        # Build Claude SDK options (includes injected user server)
-        options = self._build_sdk_options()
-
-        # Store options for the worker to use
-        self._sdk_options = options
 
         # Create the Textual TUI app
         self._app = SoftFoundryApp(
@@ -663,41 +661,28 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             on_input=self._handle_user_input,
             agent_coroutine=self._agent_worker,
         )
+        self._app.verbosity = self.config.verbosity
 
-        # Create the bridge (adapter between agent and TUI)
-        self._bridge = AgentBridge(app=self._app)
-        self._bridge._verbosity = self.config.verbosity
-
-        # Connect user server to bridge so it can display questions in TUI
+        # Connect user server to app so it can display questions in TUI
         assert self._user_server is not None
-        self._user_server.set_bridge(self._bridge)
-
-        # Replace the printer with the bridge (it implements print_message)
-        # The bridge's console property provides backward compatibility
-        self._printer = self._bridge  # type: ignore[assignment]
+        self._user_server.set_app(self._app)
 
         try:
             await self._app.run_async()
         except KeyboardInterrupt:
-            if self._bridge:
-                self._bridge.show_lifecycle_message(
-                    "Interrupted. Exiting...", "warning"
-                )
+            if self._app:
+                self._app.add_lifecycle_message("Interrupted. Exiting...", "warning")
             self.on_shutdown()
         except Exception as e:
             self.on_error(e)
             raise
 
-    async def run_session(
-        self,
-        app: SoftFoundryApp,
-        bridge: AgentBridge,
-    ) -> None:
+    async def run_session(self, app: SoftFoundryApp) -> None:
         """Run one SDK session using an existing (persistent) TUI.
 
         Unlike run(), this does NOT create or destroy the TUI. It:
         1. Sets up the user server (if not already done)
-        2. Attaches to the provided TUI app/bridge
+        2. Attaches to the provided TUI app
         3. Runs the agent loop (_run_loop)
         4. Returns when the session completes (TUI stays open)
 
@@ -706,13 +691,16 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         Args:
             app: The persistent Textual app.
-            bridge: The persistent bridge.
 
         Raises:
             Exception: Re-raises any exception after calling on_error().
         """
         self._setup_user_server()
-        self._attach_tui(app, bridge)
+        self._attach_tui(app)
+
+        # Resolve session (now that TUI is available for messages)
+        if not self.config.dry_mode:
+            self._resolve_session()
 
         # Build SDK options
         self._sdk_options = self._build_sdk_options()
@@ -723,17 +711,27 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         try:
             await self._run_loop(self._sdk_options)
         except KeyboardInterrupt:
-            if self._bridge:
-                self._bridge.show_lifecycle_message(
-                    "Interrupted. Exiting...", "warning"
-                )
+            if self._app:
+                self._app.add_lifecycle_message("Interrupted. Exiting...", "warning")
             self.on_shutdown()
             raise
         except Exception as e:
             self.on_error(e)
-            if self._bridge:
-                self._bridge.show_lifecycle_message(f"Agent error: {e}", "error")
+            if self._app:
+                self._app.add_lifecycle_message(f"Agent error: {e}", "error")
             raise
+
+    def _handle_cli_stderr(self, line: str) -> None:
+        """Handle stderr output from the Claude CLI subprocess.
+
+        Displays stderr lines as lifecycle messages in the TUI so errors
+        from the CLI are visible to the user.
+
+        Args:
+            line: A line of stderr output.
+        """
+        if self._app:
+            self._app.add_lifecycle_message(f"CLI: {line}", "error")
 
     def _build_sdk_options(self) -> ClaudeAgentOptions:
         """Build the Claude SDK options from config.
@@ -752,6 +750,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
                 "ANTHROPIC_API_KEY": "",
                 "CLAUDE_CODE_OAUTH_TOKEN": get_claude_code_token(),
             },
+            stderr=self._handle_cli_stderr,
         )
 
     async def _agent_worker(self) -> None:
@@ -763,28 +762,33 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         On completion, the TUI stays open so the user can review the
         conversation and press Ctrl+D to exit.
         """
+        assert self._app is not None
+
+        # Resolve session now that TUI is mounted
+        if not self.config.dry_mode:
+            self._resolve_session()
+
+        # Build SDK options (needs session_id from resolve)
+        self._sdk_options = self._build_sdk_options()
+
         try:
             await self._run_loop(self._sdk_options)
         except KeyboardInterrupt:
-            if self._bridge:
-                self._bridge.show_lifecycle_message(
-                    "Interrupted. Exiting...", "warning"
-                )
+            self._app.add_lifecycle_message("Interrupted. Exiting...", "warning")
             self.on_shutdown()
         except Exception as e:
             self.on_error(e)
-            if self._bridge:
-                self._bridge.show_lifecycle_message(f"Agent error: {e}", "error")
+            self._app.add_lifecycle_message(f"Agent error: {e}", "error")
 
         # Give time for final messages to render
         await asyncio.sleep(0.5)
 
-        if self._completed and self._bridge:
+        if self._completed:
             # Agent completed — keep TUI open for user to review
-            self._bridge.show_lifecycle_message("Press Ctrl+D to exit.", "info")
-            self._bridge.enable()
+            self._app.add_lifecycle_message("Press Ctrl+D to exit.", "info")
+            self._app.enable_input()
             # Don't call app.exit() — user will press Ctrl+D when ready
-        elif self._app:
+        else:
             # Error or interrupt — auto-exit
             self._app.exit()
 
@@ -794,7 +798,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Args:
             options: The ClaudeAgentOptions for the SDK client.
         """
-        assert self._bridge is not None
+        assert self._app is not None
 
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
@@ -833,16 +837,16 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Args:
             prompt: The message to send.
         """
-        assert self._bridge is not None
+        assert self._app is not None
         assert self._client is not None
 
-        self._bridge.disable("Sending message...")
-        self._bridge.status = "working"
+        self._app.disable_input("Sending message...")
+        self._app.update_status("working")
 
         try:
             await self._client.query(prompt)
         finally:
-            self._bridge.enable()
+            self._app.enable_input()
 
     async def _process_turn(self) -> TurnResult:
         """Process one turn of messages from the agent.
@@ -850,24 +854,24 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             TurnResult indicating whether to exit or if interrupted.
         """
-        assert self._bridge is not None
+        assert self._app is not None
         assert self._client is not None
 
         self._last_assistant_text = ""
         self._is_turn_running = True
-        self._bridge.status = "thinking"
+        self._app.update_status("thinking")
 
         result = TurnResult()
 
         try:
             async for message in self._client.receive_response():
-                self._printer.print_message(message)
+                self._app.add_message(message)
 
                 if isinstance(message, AssistantMessage):
                     text = extract_assistant_text(message)
                     self._last_assistant_text = text
                     self.on_assistant_message(message, text)
-                    self._bridge.status = "working"
+                    self._app.update_status("working")
 
                 if isinstance(message, ResultMessage):
                     self._save_session(
@@ -909,7 +913,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             The next prompt to send, or None if the loop should exit.
         """
-        assert self._bridge is not None
+        assert self._app is not None
 
         # If we have pending user input (from interrupt or typed while idle)
         if self._pending_input is not None:
@@ -936,10 +940,10 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         Returns:
             User input if received during wait, or None to continue.
         """
-        assert self._bridge is not None
+        assert self._app is not None
 
-        self._bridge.status = "idle"
-        self._bridge.show_lifecycle_message(
+        self._app.update_status("idle")
+        self._app.add_lifecycle_message(
             f"Waiting {interval}s before continuing...", "info"
         )
 
