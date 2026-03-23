@@ -164,6 +164,9 @@ sf reviewer \
 ### Utility Commands
 
 ```bash
+# Run a fake local agent session for TUI testing (no GitHub/API mutations)
+sf fake
+
 # Clear all sessions and status files
 sf clear
 
