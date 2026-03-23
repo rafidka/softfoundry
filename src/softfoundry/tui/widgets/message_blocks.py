@@ -17,9 +17,11 @@ import json
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Button, Label, Markdown, Static
+from textual.widgets._markdown import MarkdownFence
 
 
 # ─── Helper ──────────────────────────────────────────────────────────────────
@@ -66,7 +68,37 @@ def _preserve_newlines(text: str) -> str:
     return "".join(result)
 
 
-class TextMessage(Markdown):
+class CopyableMarkdownFence(MarkdownFence):
+    """Markdown fence block with a copy-to-clipboard button."""
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="code-fence-header"):
+            language = self.lexer.strip() if self.lexer else "text"
+            yield Static(
+                f"[dim]{_escape_markup(language)}[/dim]", classes="code-fence-lang"
+            )
+            yield Button("Copy", compact=True, classes="code-copy-button")
+        yield Label(self._highlighted_code, id="code-content")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if not event.button.has_class("code-copy-button"):
+            return
+        self.app.copy_to_clipboard(self.code)
+        self.app.notify("Code copied to clipboard", timeout=2)
+        event.stop()
+
+
+class CopyableMarkdown(Markdown):
+    """Markdown widget that renders fenced code blocks with copy buttons."""
+
+    BLOCKS = {
+        **Markdown.BLOCKS,
+        "fence": CopyableMarkdownFence,
+        "code_block": CopyableMarkdownFence,
+    }
+
+
+class TextMessage(CopyableMarkdown):
     """Assistant text output rendered as markdown.
 
     Uses Textual's Markdown widget which creates a subtree of child
@@ -360,15 +392,15 @@ class QuestionBlock(Widget):
         self.add_class("message-block", "question-block")
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            f"[bold cyan]Question:[/bold cyan] {_escape_markup(self._question)}",
-            classes="question-text",
+        yield Static("[bold cyan]Question:[/bold cyan]", classes="question-label")
+        yield CopyableMarkdown(
+            _preserve_newlines(self._question), classes="question-text"
         )
         if self._options:
             for i, opt in enumerate(self._options, 1):
-                yield Static(
-                    f"  [cyan]{i}.[/cyan] {_escape_markup(opt)}",
-                    classes="question-option",
+                yield Static(f"  [cyan]{i}.[/cyan]", classes="question-option-index")
+                yield CopyableMarkdown(
+                    _preserve_newlines(opt), classes="question-option"
                 )
             yield Static(
                 "Type a number to select, or type your own answer.",
