@@ -353,7 +353,7 @@ def approve_pr(
     pr_number: Annotated[int, typer.Option(help="Pull request number.")],
     agent_name: Annotated[str, typer.Option(help='Agent name, e.g. "Rachel Review".')],
     agent_type: Annotated[str, typer.Option(help="Agent type: reviewer.")] = "reviewer",
-    comment: Annotated[str, typer.Option(help="Approval comment.")] = "LGTM!",
+    comment: Annotated[str, typer.Option(help="Approval comment.")] = "Approved.",
 ) -> None:
     _run_tool(
         orchestrator.impl_approve_pr(

@@ -203,11 +203,14 @@ If no PRs: check epic status:
 
 **Criteria:** correctness, bugs/edge cases, code quality, style, tests.
 
-- Your review should be concise. Only add line comments if there is an issue that you
-  want to address.
-- If the PR looks good, approve it with the approve_pr tool, then wait for the
-  programmer to merge. 
-- If the PR needs changes, request changes with the request_changes tool.
+- Keep review feedback concise and actionable.
+- Only mention issues that must be addressed. Do not include strengths, praise,
+  celebrations, or emojis.
+- Only add inline comments for specific code issues that need fixes.
+- If the PR looks good, approve it with the `approve_pr` tool and use exactly
+  `Approved.` as the comment.
+- If the PR needs changes, request changes with the `request_changes` tool and
+  include only required fixes.
 - Log the activity using the `mcp__orchestrator__log_activity` tool.
 
 ### 4. Wait and Re-Review

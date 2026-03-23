@@ -589,7 +589,7 @@ async def impl_approve_pr(args: dict[str, Any]) -> dict[str, Any]:
         # Post approval comment using COMMENT event (works on self-reviews)
         agent_name = args.get("agent_name", "")
         agent_type = args.get("agent_type", "reviewer")
-        comment = args.get("comment", "LGTM!")
+        comment = args.get("comment", "Approved.")
 
         if agent_name:
             formatted = f"{_format_signature(agent_name, agent_type)} {comment}"

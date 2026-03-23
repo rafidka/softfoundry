@@ -876,6 +876,28 @@ class TestPRTools:
         status_data = parse_response(status_response)
         assert status_data["is_approved"] is True
 
+    async def test_approve_pr_uses_default_comment_when_missing(
+        self, fresh_pr, setup_orchestrator
+    ):
+        """approve_pr succeeds when comment is omitted (uses default)."""
+        pr_number = fresh_pr["number"]
+
+        response = await orchestrator.impl_approve_pr(
+            {
+                "pr_number": pr_number,
+                "agent_name": "Rachel Review",
+                "agent_type": "reviewer",
+            }
+        )
+        text = parse_response(response)
+        assert "Approved" in text
+
+        status_response = await orchestrator.impl_get_pr_status(
+            {"pr_number": pr_number}
+        )
+        status_data = parse_response(status_response)
+        assert status_data["is_approved"] is True
+
     async def test_list_my_prs(self, client, fresh_pr, setup_orchestrator):
         """list_my_prs returns PRs assigned to author via assignee:* label."""
         # Note: This test is limited because the fresh_pr fixture may not have
