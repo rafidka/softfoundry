@@ -194,7 +194,9 @@ Status values: starting, idle, working, waiting_review, addressing_feedback, exi
 - Comment on the issue using the mcp__orchestrator__comment_on_issue tool.
 - Log the claim with mcp__orchestrator__log_activity.
 
-If no tasks available: check epic — if all closed, output `exit:all_done`. Otherwise `exit:no_tasks`.
+If no tasks are available: check the epic status — if all sub-issues are closed, output \
+`exit:all_done`. Otherwise, output `exit:no_tasks` immediately. Do NOT ask the user what \
+to do. Do NOT attempt to unblock or work on tasks owned by other agents. Just exit.
 
 ### 2. Set Up Worktree
 
@@ -267,6 +269,12 @@ git branch -D feature/issue-N-slug
 - Always work in your worktree, not the main clone
 - Keep your status file updated (manager monitors heartbeats)
 - One task per session: implement, review, merge, then exit
+- NEVER merge, review, or interact with PRs created by other agents — only manage your own PRs
+- NEVER ask the user blocking questions when there is nothing to do — exit immediately with \
+the appropriate exit signal
+- Be autonomous: only use ask_user tools when you encounter genuinely ambiguous requirements \
+during active implementation. Do not ask for permission, confirmation, or next steps — follow \
+your workflow and exit when done.
 """
 
     def get_initial_prompt(self) -> str:
