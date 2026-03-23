@@ -22,6 +22,7 @@ class MessageStream(VerticalScroll):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._auto_scroll = True
+        self._programmatic_scroll = False
 
     def add_block(self, widget: Widget) -> None:
         """Append a message widget to the stream.
@@ -31,29 +32,36 @@ class MessageStream(VerticalScroll):
         """
         self.mount(widget)
         if self._auto_scroll:
-            self.call_after_refresh(self._scroll_to_end)
+            self.call_after_refresh(self._scroll_to_bottom_internal)
 
-    def _scroll_to_end(self) -> None:
-        """Scroll to the very end of the container."""
-        self.scroll_end(animate=False)
+    def _scroll_to_bottom_internal(self) -> None:
+        """Scroll to the bottom without changing auto-scroll state."""
+        self._programmatic_scroll = True
+        try:
+            self.scroll_end(animate=False)
+        finally:
+            self._programmatic_scroll = False
 
     def scroll_to_bottom(self) -> None:
         """Force scroll to bottom and re-enable auto-scroll."""
         self._auto_scroll = True
-        self.scroll_end(animate=False)
+        self._scroll_to_bottom_internal()
 
-    def on_scroll_up(self) -> None:
-        """User scrolled up — disable auto-scroll."""
-        if not self._is_at_bottom():
-            self._auto_scroll = False
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Track manual scrolling to toggle auto-scroll behavior."""
+        super().watch_scroll_y(old_value, new_value)
 
-    def on_scroll_down(self) -> None:
-        """User scrolled down — re-enable auto-scroll if at bottom."""
+        if self._programmatic_scroll:
+            return
+
         if self._is_at_bottom():
             self._auto_scroll = True
+            return
+
+        if new_value < old_value:
+            self._auto_scroll = False
 
     def _is_at_bottom(self) -> bool:
         """Check if the scroll position is at (or near) the bottom."""
-        # Use virtual_size and scroll_offset for Textual's scroll model
-        max_y = self.virtual_size.height - self.size.height
+        max_y = max(0, self.virtual_size.height - self.size.height)
         return self.scroll_offset.y >= (max_y - 2)

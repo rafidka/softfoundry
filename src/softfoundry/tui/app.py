@@ -70,7 +70,7 @@ class SoftFoundryApp(App[None]):
     BINDINGS = [
         Binding("ctrl+b", "toggle_sidebar", "Sidebar", show=False),
         Binding("ctrl+d", "quit", "Exit", show=False),
-        Binding("end", "scroll_bottom", "Jump to bottom", show=False),
+        Binding("end", "scroll_to_bottom", "Jump to bottom", show=False),
     ]
 
     status: reactive[str] = reactive("idle")
@@ -165,7 +165,7 @@ class SoftFoundryApp(App[None]):
         except Exception:
             pass
 
-    def action_scroll_bottom(self) -> None:
+    def action_scroll_to_bottom(self) -> None:
         """Jump to bottom of message stream."""
         stream = self.query_one(MessageStream)
         stream.scroll_to_bottom()

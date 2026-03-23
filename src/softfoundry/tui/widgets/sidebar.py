@@ -226,7 +226,7 @@ class KeyBindingsSection(Static):
             ("Ctrl+B", "Sidebar"),
             ("Ctrl+D", "Exit"),
             ("Ctrl+J", "Newline"),
-            ("End", "Jump to end"),
+            ("End", "Jump to bottom"),
             ("Enter", "Send"),
             ("PgUp/Dn", "Scroll"),
         ]
