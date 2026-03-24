@@ -6,6 +6,7 @@ import typer
 
 from softfoundry.utils.env import initialize_environment
 from softfoundry.agents.sessions import SESSIONS_DIR
+from softfoundry.agents.transcript import LOGS_DIR
 from softfoundry.utils.status import STATUS_DIR
 
 
@@ -62,8 +63,35 @@ def _clear_all(dry_run: bool = False) -> None:
     else:
         print(f"Status directory does not exist: {STATUS_DIR}")
 
+    # Clear log files
+    if LOGS_DIR.exists():
+        project_dirs = [d for d in LOGS_DIR.iterdir() if d.is_dir()]
+        if project_dirs:
+            for project_dir in project_dirs:
+                log_files = list(project_dir.glob("*.md"))
+                if log_files:
+                    print(
+                        f"{prefix}Clearing {len(log_files)} log file(s) from {project_dir}"
+                    )
+                    for f in log_files:
+                        print(f"  {prefix}Removing: {f.name}")
+                        if not dry_run:
+                            f.unlink()
+                # Remove empty project directory
+                if (
+                    not dry_run
+                    and project_dir.exists()
+                    and not any(project_dir.iterdir())
+                ):
+                    print(f"  {prefix}Removing empty directory: {project_dir.name}")
+                    project_dir.rmdir()
+        else:
+            print(f"No log directories found in {LOGS_DIR}")
+    else:
+        print(f"Logs directory does not exist: {LOGS_DIR}")
+
     if not dry_run:
-        print("\nAll sessions, status files, and memory files cleared!")
+        print("\nAll sessions, status files, memory files, and logs cleared!")
 
 
 def _clear_project(project: str, dry_run: bool = False) -> None:
@@ -112,9 +140,30 @@ def _clear_project(project: str, dry_run: bool = False) -> None:
     else:
         print(f"No status directory found for project '{project}'")
 
+    # Clear log files for this project
+    project_logs_dir = LOGS_DIR / project
+    if project_logs_dir.exists():
+        log_files = list(project_logs_dir.glob("*.md"))
+        if log_files:
+            print(
+                f"{prefix}Clearing {len(log_files)} log file(s) for project '{project}'"
+            )
+            for f in log_files:
+                print(f"  {prefix}Removing: {f.name}")
+                if not dry_run:
+                    f.unlink()
+            # Remove empty project directory
+            if not dry_run and not any(project_logs_dir.iterdir()):
+                print(f"  {prefix}Removing empty directory: {project_logs_dir.name}")
+                project_logs_dir.rmdir()
+        else:
+            print(f"No log files found for project '{project}'")
+    else:
+        print(f"No logs directory found for project '{project}'")
+
     if not dry_run:
         print(
-            f"\nAll sessions, status files, and memory files for '{project}' cleared!"
+            f"\nAll sessions, status files, memory files, and logs for '{project}' cleared!"
         )
 
 

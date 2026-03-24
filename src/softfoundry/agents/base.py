@@ -9,6 +9,7 @@ Subclasses implement agent-specific logic via abstract methods.
 """
 
 import asyncio
+import json
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -19,12 +20,18 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage as SDKSystemMessage,
     TextBlock,
+    ThinkingBlock as SDKThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
 from pydantic import BaseModel, Field
 
 from softfoundry.agents.memory import get_memory_path, read_memory
 from softfoundry.agents.sessions import SessionManager
+from softfoundry.agents.transcript import TranscriptLogger
 from softfoundry.mcp.user_server import UserInputServer, create_user_server
 from softfoundry.tui import SoftFoundryApp
 from softfoundry.utils.env import get_claude_code_token
@@ -176,6 +183,16 @@ class Agent(ABC):
             )
         else:
             self._memory_path = None
+
+        # Transcript logging
+        if not config.dry_mode:
+            self._transcript: TranscriptLogger | None = TranscriptLogger(
+                namespace=config.namespace,
+                agent_type=config.agent_type,
+                agent_name=config.agent_name,
+            )
+        else:
+            self._transcript = None
 
         # Internal state
         self._iteration = 0
@@ -418,6 +435,8 @@ class Agent(ABC):
         Default implementation updates the status file.
         """
         self.update_status("exited:terminated", "User interrupted")
+        if self._transcript:
+            self._transcript.log_session_end("terminated by user")
 
     def on_error(self, error: Exception) -> None:
         """Called when an unhandled exception occurs.
@@ -428,6 +447,8 @@ class Agent(ABC):
             error: The exception that occurred.
         """
         self.update_status("exited:error", f"Error: {error}")
+        if self._transcript:
+            self._transcript.log_session_end(f"error: {error}")
 
     def on_complete(self) -> None:
         """Called when is_complete() returns True.
@@ -435,6 +456,8 @@ class Agent(ABC):
         Default implementation updates the status file and shows a message.
         """
         self.update_status("exited:success", "Completed successfully")
+        if self._transcript:
+            self._transcript.log_session_end("completed")
         if self._app:
             self._app.add_lifecycle_message("Agent completed!", "success")
 
@@ -447,6 +470,8 @@ class Agent(ABC):
             "exited:terminated",
             f"Reached max iterations: {self.config.max_iterations}",
         )
+        if self._transcript:
+            self._transcript.log_session_end("max iterations reached")
         if self._app:
             self._app.add_lifecycle_message(
                 f"Reached maximum iterations ({self.config.max_iterations}). Exiting.",
@@ -576,6 +601,8 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             return
 
         # Otherwise, standard behavior: store as pending input
+        if self._transcript:
+            self._transcript.log_user_message(text)
         self._pending_input = text
 
         if self._is_turn_running and self._client:
@@ -840,6 +867,9 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
         assert self._app is not None
         assert self._client is not None
 
+        if self._transcript:
+            self._transcript.log_user_message(prompt)
+
         self._app.disable_input("Sending message...")
         self._app.update_status("working")
 
@@ -847,6 +877,78 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
             await self._client.query(prompt)
         finally:
             self._app.enable_input()
+
+    def _log_message(self, message: Any) -> None:
+        """Log an SDK message to the transcript file.
+
+        Dispatches by message type, mirroring app.add_message() but
+        writing to the transcript log instead of the TUI.
+
+        Args:
+            message: Any claude_agent_sdk message type.
+        """
+        if self._transcript is None:
+            return
+
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text.strip():
+                    self._transcript.log_assistant_text(block.text)
+                elif isinstance(block, SDKThinkingBlock):
+                    self._transcript.log_thinking(block.thinking)
+                elif isinstance(block, ToolUseBlock):
+                    tool_input = block.input if isinstance(block.input, dict) else {}
+                    self._transcript.log_tool_use(block.name, tool_input)
+        elif isinstance(message, UserMessage):
+            content = message.content
+            if isinstance(content, str):
+                self._transcript.log_user_message(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, ToolResultBlock):
+                        content_str = self._format_tool_result(block.content)
+                        self._transcript.log_tool_result(
+                            content_str, block.is_error or False
+                        )
+                    elif isinstance(block, TextBlock) and block.text.strip():
+                        self._transcript.log_user_message(block.text)
+        elif isinstance(message, SDKSystemMessage):
+            if message.subtype != "init":
+                self._transcript.log_system_message(message.subtype)
+        elif isinstance(message, ResultMessage):
+            self._transcript.log_result(
+                message.subtype,
+                message.duration_ms,
+                message.total_cost_usd,
+                message.num_turns,
+            )
+
+    @staticmethod
+    def _format_tool_result(content: Any) -> str:
+        """Format tool result content to a string for logging.
+
+        Args:
+            content: The tool result content (str, list, or other).
+
+        Returns:
+            Formatted string representation.
+        """
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(item.get("text", ""))
+                    else:
+                        parts.append(json.dumps(item, default=str))
+                else:
+                    parts.append(str(item))
+            return "\n".join(parts)
+        elif content is None:
+            return ""
+        return str(content)
 
     async def _process_turn(self) -> TurnResult:
         """Process one turn of messages from the agent.
@@ -865,6 +967,7 @@ Its contents persist across sessions. Use the Write and Edit tools to update it.
 
         try:
             async for message in self._client.receive_response():
+                self._log_message(message)
                 self._app.add_message(message)
 
                 if isinstance(message, AssistantMessage):
