@@ -586,3 +586,23 @@ Use conventional commits:
 - `refactor:` Refactoring
 - `test:` Tests
 - `chore:` Maintenance
+
+### Commit Message Format
+
+Follow the 50/72 rule:
+
+- **Subject line**: Maximum 50 characters, use imperative mood
+- **Body**: Wrap at 72 characters
+- **Reference issues**: Add `Close #xxx` at the end when fixing/closing an issue
+
+Example:
+
+```
+feat: add list_labels tool to check existing labels
+
+Manager now calls list_labels first and only creates labels that
+don't exist, avoiding unnecessary API calls when labels are already
+present in the repository.
+
+Close #10
+```
