@@ -794,6 +794,17 @@ async def impl_get_pr_diff(args: dict[str, Any]) -> dict[str, Any]:
 # ---- Label Tools ----
 
 
+async def impl_list_labels(args: dict[str, Any]) -> dict[str, Any]:
+    """List all labels in the repository."""
+    try:
+        client = _get_client()
+        labels = await client.list_labels()
+        result = [{"name": lbl["name"], "color": lbl["color"]} for lbl in labels]
+        return _json_success(result)
+    except GitHubClientError as e:
+        return _error(str(e))
+
+
 async def impl_create_label(args: dict[str, Any]) -> dict[str, Any]:
     """Create or update a label."""
     try:
@@ -1336,6 +1347,15 @@ async def tool_comment_on_pr(args: dict[str, Any]) -> dict[str, Any]:
 
 
 @tool(
+    "list_labels",
+    "List all labels in the repository",
+    {},
+)
+async def tool_list_labels(args: dict[str, Any]) -> dict[str, Any]:
+    return await impl_list_labels(args)
+
+
+@tool(
     "create_label",
     "Create or update a GitHub label",
     {"name": str, "color": str, "description": str},
@@ -1507,6 +1527,7 @@ def create_orchestrator_server(
             tool_comment_on_issue,
             tool_comment_on_pr,
             # Label tools
+            tool_list_labels,
             tool_create_label,
             tool_update_issue_labels,
             # Issue tools

@@ -545,6 +545,20 @@ class GitHubClient:
     # Label Methods
     # -------------------------------------------------------------------------
 
+    async def list_labels(self, per_page: int = 100) -> list[dict[str, Any]]:
+        """List all labels in the repository.
+
+        Args:
+            per_page: Results per page (max 100).
+
+        Returns:
+            List of label dicts with name, color, etc.
+        """
+        return await self._rest_get(
+            f"/repos/{self.owner}/{self.repo}/labels",
+            params={"per_page": per_page},
+        )
+
     async def create_label(
         self, name: str, color: str, description: str = ""
     ) -> dict[str, Any]:

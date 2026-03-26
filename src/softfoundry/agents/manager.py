@@ -97,6 +97,7 @@ class ManagerAgent(Agent):
                 "mcp__orchestrator__comment_on_issue",
                 "mcp__orchestrator__comment_on_pr",
                 # Label tools
+                "mcp__orchestrator__list_labels",
                 "mcp__orchestrator__create_label",
                 "mcp__orchestrator__update_issue_labels",
                 # Activity tools
@@ -172,7 +173,9 @@ EOF
 **1.2 PROJECT.md**: If missing, use `mcp__user__ask_user` to ask the user about \
 scope/tech/features, write it, commit and push.
 
-**1.3 Create Labels**: Use `mcp__orchestrator__create_label` for each:
+**1.3 Create Labels**: First use `mcp__orchestrator__list_labels` to check which labels \
+already exist in the repository. Then only create missing labels using \
+`mcp__orchestrator__create_label`. Required labels:
 - `type:epic` (color {LABEL_COLORS["type_epic"]})
 - `status:pending` (color {LABEL_COLORS["status_pending"]})
 - `status:in-progress` (color {LABEL_COLORS["status_in_progress"]})
